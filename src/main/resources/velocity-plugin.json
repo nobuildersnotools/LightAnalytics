@@ -1,0 +1,11 @@
+{
+  "id": "lightanalytics",
+  "name": "LightAnalytics",
+  "version": "${version}",
+  "main": "org.carrotcraft.lightAnalytics.LightAnalytics",
+  "description": "LightAnalytics",
+  "url": "Simple, lightweight, no BS analytics plugin.",
+  "authors": [
+    "bedrock3359"
+  ]
+}
