@@ -66,6 +66,36 @@ public final class SnapshotRepository {
     }
 
     /**
+     * The full-resolution snapshot with the highest player count across all of
+     * {@code snapshots}, or null if the table is empty. Ties resolve to the most
+     * recent occurrence. Used by the metrics layer for the all-time peak.
+     */
+    public Snapshot peakSnapshot(Connection connection) throws SQLException {
+        String sql = "SELECT timestamp, player_count, cpu_process, cpu_system, heap_used, heap_max "
+                + "FROM snapshots ORDER BY player_count DESC, timestamp DESC LIMIT 1";
+        try (PreparedStatement ps = connection.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            return rs.next() ? map(rs) : null;
+        }
+    }
+
+    /**
+     * The hourly rollup with the highest observed maximum player count across all
+     * of {@code snapshots_hourly}, or null if the table is empty. Lets the metrics
+     * layer recover an all-time peak that has since aged out of full resolution.
+     */
+    public HourlySnapshot peakHourly(Connection connection) throws SQLException {
+        String sql = "SELECT bucket_start, sample_count, player_count_min, player_count_max, player_count_avg, "
+                + "cpu_process_avg, cpu_process_max, cpu_system_avg, cpu_system_max, "
+                + "heap_used_avg, heap_used_max, heap_max "
+                + "FROM snapshots_hourly ORDER BY player_count_max DESC, bucket_start DESC LIMIT 1";
+        try (PreparedStatement ps = connection.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            return rs.next() ? mapHourly(rs) : null;
+        }
+    }
+
+    /**
      * Rolls every full-resolution snapshot older than {@code cutoffMillis} up into
      * its hour bucket in {@code snapshots_hourly}. The caller must pass an
      * hour-aligned cutoff (a multiple of {@link #HOUR_MILLIS}); that guarantees no

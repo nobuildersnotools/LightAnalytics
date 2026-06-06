@@ -73,6 +73,41 @@ public final class PlayerRepository {
         }
     }
 
+    /** Total number of distinct players ever seen. */
+    public long count(Connection connection) throws SQLException {
+        String sql = "SELECT COUNT(*) FROM players";
+        try (PreparedStatement ps = connection.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            return rs.next() ? rs.getLong(1) : 0L;
+        }
+    }
+
+    /**
+     * Sum of {@code total_sessions} across every player — the all-time login count.
+     * This survives session pruning because the per-player counter is cumulative
+     * and never decremented, unlike rows in the {@code sessions} table.
+     */
+    public long sumTotalSessions(Connection connection) throws SQLException {
+        String sql = "SELECT COALESCE(SUM(total_sessions), 0) FROM players";
+        try (PreparedStatement ps = connection.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            return rs.next() ? rs.getLong(1) : 0L;
+        }
+    }
+
+    /** Earliest {@code first_seen} across all players, or -1 if no players exist. */
+    public long earliestFirstSeen(Connection connection) throws SQLException {
+        String sql = "SELECT MIN(first_seen) FROM players";
+        try (PreparedStatement ps = connection.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            if (rs.next()) {
+                long value = rs.getLong(1);
+                return rs.wasNull() ? -1L : value;
+            }
+            return -1L;
+        }
+    }
+
     /** The aggregate record for a player, or null if never seen. */
     public PlayerRecord find(Connection connection, UUID uuid) throws SQLException {
         String sql = "SELECT uuid, username, first_seen, last_seen, total_sessions "

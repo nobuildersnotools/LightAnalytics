@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LightAnalytics · Sign in</title>
+    <link rel="icon"
+          href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%230b0d0c'/%3E%3Cpath d='M6 22 L13 12 L19 18 L26 8' fill='none' stroke='%235be08a' stroke-width='2.5' stroke-linecap='square'/%3E%3C/svg%3E">
+    <style>
+        :root {
+            --bg: #0a0c0b; --panel: #11150f; --line: rgba(150,170,145,0.16);
+            --line-strong: rgba(150,170,145,0.3); --text: #d9e2d4; --dim: #93a08c;
+            --muted: #69745f; --green: #5be08a;
+            --mono: ui-monospace, "JetBrains Mono", "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+        }
+        * { box-sizing: border-box; }
+        html, body { margin: 0; height: 100%; }
+        body {
+            font-family: var(--mono); color: var(--text); background:
+                radial-gradient(120% 90% at 50% -20%, rgba(91,224,138,0.08), transparent 55%),
+                repeating-linear-gradient(0deg, transparent 0 39px, var(--line) 39px 40px) padding-box,
+                repeating-linear-gradient(90deg, transparent 0 39px, var(--line) 39px 40px) padding-box,
+                var(--bg);
+            display: grid; place-items: center; min-height: 100%; padding: 24px;
+            letter-spacing: 0.01em;
+        }
+        .card {
+            width: 100%; max-width: 460px; background: var(--panel);
+            border: 1px solid var(--line-strong);
+            padding: 40px 38px;
+            box-shadow: 0 30px 80px rgba(0,0,0,0.5);
+        }
+        .mark { color: var(--green); font-size: 18px; letter-spacing: -3px; }
+        .brand { display: flex; align-items: baseline; gap: 10px; margin-bottom: 30px; }
+        .brand .name { font-weight: 600; letter-spacing: 0.3em; font-size: 14px; }
+        .brand .sub { color: var(--muted); font-size: 12px; }
+        h1 {
+            font-size: 13px; letter-spacing: 0.28em; text-transform: uppercase;
+            color: var(--green); margin: 0 0 18px;
+        }
+        p { color: var(--dim); font-size: 13.5px; line-height: 1.7; margin: 0 0 16px; }
+        .steps { margin: 24px 0 8px; padding: 0; list-style: none; counter-reset: s; }
+        .steps li {
+            counter-increment: s; position: relative; padding: 12px 0 12px 44px;
+            border-top: 1px solid var(--line); color: var(--text); font-size: 13.5px;
+        }
+        .steps li:last-child { border-bottom: 1px solid var(--line); }
+        .steps li::before {
+            content: counter(s, decimal-leading-zero);
+            position: absolute; left: 0; top: 12px;
+            color: var(--green); font-size: 12px; letter-spacing: 0.1em;
+        }
+        code {
+            background: rgba(91,224,138,0.1); border: 1px solid var(--line);
+            color: var(--green); padding: 2px 7px; font-size: 12.5px;
+        }
+        .note {
+            margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--line);
+            color: var(--muted); font-size: 11.5px; letter-spacing: 0.05em; line-height: 1.7;
+        }
+    </style>
+</head>
+<body>
+<main class="card">
+    <div class="brand">
+        <span class="mark">◢◤</span>
+        <span class="name">LIGHTANALYTICS</span>
+        <span class="sub">// telemetry</span>
+    </div>
+    <h1>Sign in required</h1>
+    <p>This dashboard is gated by your in-game permissions — there are no passwords to manage or leak.</p>
+    <ol class="steps">
+        <li>Join the proxy as an admin (permission <code>lightanalytics.admin</code>).</li>
+        <li>Run <code>/lightanalytics web</code> in chat.</li>
+        <li>Click the single-use link it sends you — it expires in seconds.</li>
+    </ol>
+    <p class="note">
+        The link logs you in on this device and sets a session cookie. If you reached this page
+        after your session expired, just request a fresh link.
+    </p>
+</main>
+</body>
+</html>

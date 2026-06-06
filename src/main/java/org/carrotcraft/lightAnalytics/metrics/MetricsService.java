@@ -63,6 +63,128 @@ public final class MetricsService {
     }
 
     /**
+     * Highest concurrent player count ever observed, across both full-resolution
+     * snapshots and hourly rollups, and when it occurred. The timestamp is exact
+     * when the peak still lives in full resolution, otherwise the start of the
+     * winning hour bucket.
+     */
+    public PeakPlayers allTimePeak() {
+        return database.read(this::allTimePeak);
+    }
+
+    /** Headline all-time figures for the dashboard, gathered on one connection. */
+    public AllTimeStats allTimeStats() {
+        return database.read(connection -> {
+            Snapshot latest = snapshots.latest(connection);
+            int current = latest == null ? 0 : latest.playerCount();
+            PeakPlayers peak = allTimePeak(connection);
+            return new AllTimeStats(
+                    current,
+                    peak.peak(),
+                    peak.atTimestamp(),
+                    players.count(connection),
+                    players.sumTotalSessions(connection),
+                    players.earliestFirstSeen(connection)
+            );
+        });
+    }
+
+    /**
+     * Time-series for the dashboard chart over {@code [from, to]}, merging
+     * full-resolution snapshots with the hourly rollups the window spans (the two
+     * resolutions are disjoint in time by construction). The merged series is then
+     * bucket-averaged down to at most {@code maxPoints} points so payloads stay
+     * bounded regardless of zoom level; each emitted point weights its inputs by
+     * how many raw samples they represent (1 for a snapshot, its sample count for a
+     * rollup). A non-positive {@code maxPoints} disables the cap.
+     */
+    public List<SeriesPoint> series(long from, long to, int maxPoints) {
+        return database.read(connection -> {
+            List<Weighted> points = new ArrayList<>();
+            for (Snapshot s : snapshots.between(connection, from, to)) {
+                points.add(new Weighted(s.timestamp(), s.playerCount(), s.cpuProcessLoad(),
+                        s.cpuSystemLoad(), s.heapUsed(), s.heapMax(), 1));
+            }
+            for (HourlySnapshot h : snapshots.hourlyBetween(connection, from, to)) {
+                points.add(new Weighted(h.bucketStart(), h.playerCountAvg(), h.cpuProcessAvg(),
+                        h.cpuSystemAvg(), h.heapUsedAvg(), h.heapMax(), h.sampleCount()));
+            }
+            points.sort(java.util.Comparator.comparingLong(Weighted::timestamp));
+            return downsample(points, maxPoints);
+        });
+    }
+
+    /** Combines the all-time full-resolution and hourly peaks on an open connection. */
+    private PeakPlayers allTimePeak(Connection connection) throws SQLException {
+        Snapshot rawPeak = snapshots.peakSnapshot(connection);
+        HourlySnapshot hourlyPeak = snapshots.peakHourly(connection);
+        int peak = 0;
+        long peakAt = -1;
+        if (rawPeak != null) {
+            peak = rawPeak.playerCount();
+            peakAt = rawPeak.timestamp();
+        }
+        if (hourlyPeak != null && hourlyPeak.playerCountMax() > peak) {
+            peak = hourlyPeak.playerCountMax();
+            peakAt = hourlyPeak.bucketStart();
+        }
+        return new PeakPlayers(peak, peakAt);
+    }
+
+    /**
+     * Reduces a timestamp-ordered weighted series to at most {@code maxPoints}
+     * points by grouping consecutive entries into equal-sized buckets and emitting
+     * a weighted average per bucket (heap max is taken as the bucket max). A
+     * non-positive cap, or a series already within the cap, is returned as-is.
+     */
+    private List<SeriesPoint> downsample(List<Weighted> points, int maxPoints) {
+        int n = points.size();
+        if (maxPoints <= 0 || n <= maxPoints) {
+            List<SeriesPoint> out = new ArrayList<>(n);
+            for (Weighted p : points) {
+                out.add(new SeriesPoint(p.timestamp, p.players, p.cpuProcess, p.cpuSystem, p.heapUsed, p.heapMax));
+            }
+            return out;
+        }
+        int groupSize = (n + maxPoints - 1) / maxPoints;
+        List<SeriesPoint> out = new ArrayList<>((n + groupSize - 1) / groupSize);
+        for (int start = 0; start < n; start += groupSize) {
+            int end = Math.min(start + groupSize, n);
+            long timeSum = 0;
+            long count = 0;
+            long weight = 0;
+            double players = 0;
+            double cpuProcess = 0;
+            double cpuSystem = 0;
+            double heapUsed = 0;
+            long heapMax = 0;
+            boolean any = false;
+            for (int i = start; i < end; i++) {
+                Weighted p = points.get(i);
+                timeSum += p.timestamp;
+                count++;
+                weight += p.weight;
+                players += p.players * p.weight;
+                cpuProcess += p.cpuProcess * p.weight;
+                cpuSystem += p.cpuSystem * p.weight;
+                heapUsed += p.heapUsed * p.weight;
+                if (!any || p.heapMax > heapMax) heapMax = p.heapMax;
+                any = true;
+            }
+            long w = weight == 0 ? 1 : weight;
+            out.add(new SeriesPoint(
+                    timeSum / count,
+                    players / w,
+                    cpuProcess / w,
+                    cpuSystem / w,
+                    heapUsed / w,
+                    heapMax
+            ));
+        }
+        return out;
+    }
+
+    /**
      * Full-resolution population-over-time series for {@code [from, to]}, oldest
      * first. Intended for windows inside the full-resolution retention period;
      * older windows have only the coarse aggregates of {@link #peakPlayers} /
@@ -236,5 +358,10 @@ public final class MetricsService {
 
     /** Internal carrier for the combined player-count aggregation. */
     private record PlayerCounts(int peak, long peakAt, double avg) {
+    }
+
+    /** A merged series entry awaiting downsampling; {@code weight} is its raw-sample count. */
+    private record Weighted(long timestamp, double players, double cpuProcess, double cpuSystem,
+                            double heapUsed, long heapMax, long weight) {
     }
 }

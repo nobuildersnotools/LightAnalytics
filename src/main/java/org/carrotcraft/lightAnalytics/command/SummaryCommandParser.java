@@ -6,8 +6,15 @@ import java.util.List;
 final class SummaryCommandParser {
 
     private static final String SUMMARY = "summary";
+    private static final String WEB = "web";
+    private static final List<String> SUBCOMMANDS = List.of(SUMMARY, WEB);
 
     private SummaryCommandParser() {
+    }
+
+    /** True for {@code /lightanalytics web} (issue a dashboard login link). */
+    static boolean isWeb(String[] args) {
+        return args.length == 1 && WEB.equalsIgnoreCase(args[0]);
     }
 
     static SummaryWindow parseWindow(String[] args) {
@@ -22,10 +29,13 @@ final class SummaryCommandParser {
 
     static List<String> suggest(String[] args) {
         if (args.length == 0) {
-            return List.of(SUMMARY);
+            return SUBCOMMANDS;
         }
         if (args.length == 1) {
-            return startsWith(SUMMARY, args[0]) ? List.of(SUMMARY) : List.of();
+            String prefix = args[0].toLowerCase();
+            return SUBCOMMANDS.stream()
+                    .filter(sub -> sub.startsWith(prefix))
+                    .toList();
         }
         if (args.length == 2 && SUMMARY.equalsIgnoreCase(args[0])) {
             String prefix = args[1].toLowerCase();
@@ -34,9 +44,5 @@ final class SummaryCommandParser {
                     .toList();
         }
         return List.of();
-    }
-
-    private static boolean startsWith(String value, String prefix) {
-        return value.startsWith(prefix.toLowerCase());
     }
 }

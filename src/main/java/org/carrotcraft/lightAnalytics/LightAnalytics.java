@@ -16,6 +16,8 @@ import org.carrotcraft.lightAnalytics.storage.Database;
 import org.carrotcraft.lightAnalytics.storage.PlayerRepository;
 import org.carrotcraft.lightAnalytics.storage.SessionRepository;
 import org.carrotcraft.lightAnalytics.storage.SnapshotRepository;
+import org.carrotcraft.lightAnalytics.web.AuthService;
+import org.carrotcraft.lightAnalytics.web.WebServer;
 import org.slf4j.Logger;
 
 import java.nio.file.Path;
@@ -37,6 +39,7 @@ public class LightAnalytics {
     private ResourceSampler sampler;
     private RetentionTask retention;
     private MetricsService metrics;
+    private WebServer webServer;
     private CommandMeta commandMeta;
     private final SessionRepository sessions = new SessionRepository();
 
@@ -74,7 +77,23 @@ public class LightAnalytics {
         retention.start();
 
         metrics = new MetricsService(database, snapshots, sessions, players);
-        LightAnalyticsCommand command = new LightAnalyticsCommand(metrics, Clock.systemUTC(), logger);
+
+        AnalyticsConfig.WebConfig webConfig = config.web();
+        AuthService auth = null;
+        if (webConfig.enabled()) {
+            auth = new AuthService(webConfig.tokenTtl(), webConfig.sessionTtl());
+            webServer = new WebServer(webConfig, metrics, auth, dataDirectory, logger);
+            try {
+                webServer.start();
+            } catch (Exception e) {
+                logger.error("Failed to start LightAnalytics web dashboard; it will be unavailable", e);
+                webServer = null;
+                auth = null;
+            }
+        }
+
+        LightAnalyticsCommand command = new LightAnalyticsCommand(metrics, Clock.systemUTC(), logger,
+                auth, webConfig);
         commandMeta = proxy.getCommandManager()
                 .metaBuilder("lightanalytics")
                 .plugin(this)
@@ -89,6 +108,10 @@ public class LightAnalytics {
         if (commandMeta != null) {
             proxy.getCommandManager().unregister(commandMeta);
             commandMeta = null;
+        }
+        if (webServer != null) {
+            webServer.stop();
+            webServer = null;
         }
         if (sampler != null) {
             sampler.stop();

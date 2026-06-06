@@ -163,6 +163,69 @@ class MetricsServiceTest {
     }
 
     @Test
+    void allTimeStatsCombinePlayersSnapshotsAndHourly() {
+        seed(connection -> {
+            players.upsertOnLogin(connection, P1, "p1", 1_000);
+            players.upsertOnLogin(connection, P1, "p1", 2_000); // returning -> total_sessions = 2
+            players.upsertOnLogin(connection, P2, "p2", 5_000);
+            snapshots.insert(connection, new Snapshot(10_000, 7, 0.1, 0.1, 100, 1000));
+            snapshots.insertHourly(connection, new HourlySnapshot(
+                    0, 5, 1, 25, 4.0, 0.1, 0.2, 0.1, 0.2, 100.0, 200, 1000));
+        });
+
+        AllTimeStats stats = metrics.allTimeStats();
+        assertEquals(7, stats.currentPopulation());  // latest snapshot
+        assertEquals(25, stats.peakPlayers());        // hourly max beats raw 7
+        assertEquals(0, stats.peakAt());              // reported at the bucket start
+        assertEquals(2, stats.uniquePlayers());       // p1, p2
+        assertEquals(3, stats.totalSessions());       // p1 = 2, p2 = 1
+        assertEquals(1_000, stats.firstEverSeen());
+    }
+
+    @Test
+    void allTimePeakPrefersRawWhenHigher() {
+        seed(connection -> {
+            snapshots.insert(connection, new Snapshot(10_000, 30, 0.1, 0.1, 100, 1000));
+            snapshots.insertHourly(connection, new HourlySnapshot(
+                    0, 5, 1, 25, 4.0, 0.1, 0.2, 0.1, 0.2, 100.0, 200, 1000));
+        });
+
+        PeakPlayers peak = metrics.allTimePeak();
+        assertEquals(30, peak.peak());
+        assertEquals(10_000, peak.atTimestamp());
+    }
+
+    @Test
+    void allTimeStatsAreZeroOnEmptyDatabase() {
+        AllTimeStats stats = metrics.allTimeStats();
+        assertEquals(0, stats.currentPopulation());
+        assertEquals(0, stats.peakPlayers());
+        assertEquals(-1, stats.peakAt());
+        assertEquals(0, stats.uniquePlayers());
+        assertEquals(0, stats.totalSessions());
+        assertEquals(-1, stats.firstEverSeen());
+    }
+
+    @Test
+    void seriesMergesRawAndHourlyOrderedAndCapsPoints() {
+        seed(connection -> {
+            snapshots.insertHourly(connection, new HourlySnapshot(
+                    0, 4, 1, 10, 5.0, 0.5, 0.9, 0.6, 0.95, 500.0, 900, 1000));
+            snapshots.insert(connection, new Snapshot(3_600_000, 8, 0.40, 0.50, 400, 1000));
+            snapshots.insert(connection, new Snapshot(3_660_000, 9, 0.45, 0.55, 450, 1000));
+        });
+
+        List<SeriesPoint> all = metrics.series(0, 4_000_000, 1000);
+        assertEquals(3, all.size());                       // 1 hourly + 2 raw
+        assertEquals(0, all.get(0).timestamp());           // oldest first
+        assertEquals(5.0, all.get(0).playerCount(), 1e-9); // hourly average
+        assertEquals(8.0, all.get(1).playerCount(), 1e-9);
+
+        List<SeriesPoint> capped = metrics.series(0, 4_000_000, 2);
+        assertEquals(2, capped.size());                    // downsampled to the cap
+    }
+
+    @Test
     void peakAndTrendsRecombineRawAndHourly() {
         seed(connection -> {
             // Old, downsampled hour bucket at epoch 0.

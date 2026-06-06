@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LightAnalytics · Telemetry</title>
+    <link rel="icon"
+          href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%230b0d0c'/%3E%3Cpath d='M6 22 L13 12 L19 18 L26 8' fill='none' stroke='%235be08a' stroke-width='2.5' stroke-linecap='square'/%3E%3C/svg%3E">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="grain" aria-hidden="true"></div>
+
+<header class="topbar">
+    <div class="brand">
+        <span class="brand-mark" aria-hidden="true">◢◤</span>
+        <span class="brand-name">LIGHTANALYTICS</span>
+        <span class="brand-sub">// telemetry</span>
+    </div>
+    <div class="topbar-right">
+        <div class="status" title="Players currently online">
+            <span class="status-dot" id="statusDot"></span>
+            <span class="status-text"><b id="statusCount">—</b> online</span>
+        </div>
+        <button class="btn-logout" id="logoutBtn" type="button">LOGOUT</button>
+    </div>
+</header>
+
+<main class="wrap">
+
+    <section class="alltime reveal" style="--d:0">
+        <div class="alltime-head"><span class="rule"></span><span class="kicker">all-time record</span><span class="rule"></span></div>
+        <div class="alltime-row">
+            <div class="cell">
+                <div class="cell-label">peak players</div>
+                <div class="cell-value" id="atPeak">—</div>
+                <div class="cell-sub" id="atPeakDate">&nbsp;</div>
+            </div>
+            <div class="cell">
+                <div class="cell-label">unique players</div>
+                <div class="cell-value" id="atUnique">—</div>
+                <div class="cell-sub">distinct accounts</div>
+            </div>
+            <div class="cell">
+                <div class="cell-label">total sessions</div>
+                <div class="cell-value" id="atSessions">—</div>
+                <div class="cell-sub">logins recorded</div>
+            </div>
+            <div class="cell">
+                <div class="cell-label">tracking since</div>
+                <div class="cell-value cell-value--sm" id="atFirst">—</div>
+                <div class="cell-sub" id="atFirstAgo">&nbsp;</div>
+            </div>
+        </div>
+    </section>
+
+    <section class="controls reveal" style="--d:1">
+        <div class="controls-label">window</div>
+        <div class="segmented" id="windowToggle" role="tablist">
+            <button class="seg is-active" data-window="24h" role="tab" type="button">24H</button>
+            <button class="seg" data-window="7d" role="tab" type="button">7D</button>
+            <button class="seg" data-window="30d" role="tab" type="button">30D</button>
+        </div>
+        <div class="controls-spacer"></div>
+        <div class="controls-stamp" id="rangeStamp">—</div>
+    </section>
+
+    <section class="summary-grid">
+        <article class="card reveal" style="--d:2">
+            <div class="card-label">current population</div>
+            <div class="card-value" id="sumCurrent">—</div>
+            <div class="card-foot">players connected now</div>
+        </article>
+
+        <article class="card reveal" style="--d:3">
+            <div class="card-label">window peak</div>
+            <div class="card-value" id="sumPeak">—</div>
+            <div class="card-foot" id="sumPeakDate">&nbsp;</div>
+        </article>
+
+        <article class="card reveal" style="--d:4">
+            <div class="card-label">avg population</div>
+            <div class="card-value-row">
+                <span class="card-value" id="sumAvg">—</span>
+                <span class="delta" id="sumAvgDelta">&nbsp;</span>
+            </div>
+            <div class="card-foot">vs previous window</div>
+        </article>
+
+        <article class="card reveal" style="--d:5">
+            <div class="card-label">new players</div>
+            <div class="card-value" id="sumNew">—</div>
+            <div class="card-foot">first seen in window</div>
+        </article>
+
+        <article class="card reveal" style="--d:6">
+            <div class="card-label">retention</div>
+            <div class="card-value" id="sumRetention">—</div>
+            <div class="bar"><span class="bar-fill" id="retentionBar"></span></div>
+            <div class="card-foot" id="sumRetentionSub">cohort returned</div>
+        </article>
+
+        <article class="card reveal" style="--d:7">
+            <div class="card-label">sessions</div>
+            <div class="card-value" id="sumSessions">—</div>
+            <div class="card-foot">
+                avg <b id="sumSessionsAvg">—</b> · total <b id="sumSessionsTotal">—</b>
+            </div>
+        </article>
+
+        <article class="card reveal" style="--d:8">
+            <div class="card-label">proxy cpu</div>
+            <div class="card-value-row">
+                <span class="card-value" id="sumCpu">—</span>
+                <span class="card-unit">process avg</span>
+            </div>
+            <div class="bar"><span class="bar-fill" id="cpuBar"></span></div>
+            <div class="card-foot">
+                peak <b id="sumCpuPeak">—</b> · system <b id="sumCpuSys">—</b>
+            </div>
+        </article>
+
+        <article class="card reveal" style="--d:9">
+            <div class="card-label">heap usage</div>
+            <div class="card-value-row">
+                <span class="card-value" id="sumHeap">—</span>
+                <span class="card-unit" id="sumHeapMax">/ —</span>
+            </div>
+            <div class="bar"><span class="bar-fill" id="heapBar"></span></div>
+            <div class="card-foot">avg used <b id="sumHeapAvg">—</b></div>
+        </article>
+    </section>
+
+    <section class="chart-panel reveal" style="--d:10">
+        <div class="chart-head">
+            <div class="chart-title">
+                <span class="chart-title-main">population &amp; resources</span>
+                <span class="chart-title-sub" id="chartHint">scroll to zoom · drag to pan · double-click to reset</span>
+            </div>
+            <div class="chart-legend" id="chartLegend"></div>
+        </div>
+        <div class="chart-stage">
+            <canvas id="chart"></canvas>
+            <div class="chart-tooltip" id="chartTooltip" hidden></div>
+            <div class="chart-empty" id="chartEmpty" hidden>no samples in this range</div>
+            <button class="btn-reset" id="resetZoom" type="button" hidden>RESET ZOOM</button>
+        </div>
+    </section>
+
+    <footer class="foot">
+        <span>LightAnalytics</span><span class="foot-dot">·</span><span>embedded telemetry console</span>
+    </footer>
+</main>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>

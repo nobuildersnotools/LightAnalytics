@@ -63,9 +63,21 @@
                     </plugin>
                 </plugins>
                 <resources>
+                    <!-- Only the plugin descriptor needs Maven ${...} substitution. The web
+                         assets contain JS template literals (${...}) and must NOT be filtered. -->
                     <resource>
                         <directory>src/main/resources</directory>
                         <filtering>true</filtering>
+                        <includes>
+                            <include>velocity-plugin.json</include>
+                        </includes>
+                    </resource>
+                    <resource>
+                        <directory>src/main/resources</directory>
+                        <filtering>false</filtering>
+                        <excludes>
+                            <exclude>velocity-plugin.json</exclude>
+                        </excludes>
                     </resource>
                 </resources>
             </build>
@@ -75,9 +87,21 @@
     <build>
         <defaultGoal>clean package</defaultGoal>
         <resources>
+            <!-- Only the plugin descriptor needs Maven ${...} substitution. The web
+                 assets contain JS template literals (${...}) and must NOT be filtered. -->
             <resource>
                 <directory>${project.basedir}/src/main/resources</directory>
                 <filtering>true</filtering>
+                <includes>
+                    <include>velocity-plugin.json</include>
+                </includes>
+            </resource>
+            <resource>
+                <directory>${project.basedir}/src/main/resources</directory>
+                <filtering>false</filtering>
+                <excludes>
+                    <exclude>velocity-plugin.json</exclude>
+                </excludes>
             </resource>
         </resources>
         <plugins>
