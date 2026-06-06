@@ -1,11 +1,13 @@
 package org.carrotcraft.lightAnalytics;
 
 import com.google.inject.Inject;
+import com.velocitypowered.api.command.CommandMeta;
 import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
 import com.velocitypowered.api.event.proxy.ProxyShutdownEvent;
 import com.velocitypowered.api.plugin.annotation.DataDirectory;
 import com.velocitypowered.api.proxy.ProxyServer;
+import org.carrotcraft.lightAnalytics.command.LightAnalyticsCommand;
 import org.carrotcraft.lightAnalytics.collection.ConnectionListener;
 import org.carrotcraft.lightAnalytics.collection.ResourceSampler;
 import org.carrotcraft.lightAnalytics.collection.RetentionTask;
@@ -17,6 +19,7 @@ import org.carrotcraft.lightAnalytics.storage.SnapshotRepository;
 import org.slf4j.Logger;
 
 import java.nio.file.Path;
+import java.time.Clock;
 
 /**
  * Plugin entry point. Owns the lifecycle of the collection layer: it opens the
@@ -34,6 +37,7 @@ public class LightAnalytics {
     private ResourceSampler sampler;
     private RetentionTask retention;
     private MetricsService metrics;
+    private CommandMeta commandMeta;
     private final SessionRepository sessions = new SessionRepository();
 
     @Inject
@@ -69,16 +73,23 @@ public class LightAnalytics {
                 config.compactionInterval(), config.snapshotRetention(), config.sessionRetention());
         retention.start();
 
-        // The metrics layer reads the collected data; no output surface consumes it
-        // yet (commands/dashboards are a later phase), but it is wired here so that
-        // phase has a ready collaborator.
         metrics = new MetricsService(database, snapshots, sessions, players);
+        LightAnalyticsCommand command = new LightAnalyticsCommand(metrics, Clock.systemUTC(), logger);
+        commandMeta = proxy.getCommandManager()
+                .metaBuilder("lightanalytics")
+                .plugin(this)
+                .build();
+        proxy.getCommandManager().register(commandMeta, command);
 
         logger.info("LightAnalytics enabled");
     }
 
     @Subscribe
     public void onProxyShutdown(ProxyShutdownEvent event) {
+        if (commandMeta != null) {
+            proxy.getCommandManager().unregister(commandMeta);
+            commandMeta = null;
+        }
         if (sampler != null) {
             sampler.stop();
         }
