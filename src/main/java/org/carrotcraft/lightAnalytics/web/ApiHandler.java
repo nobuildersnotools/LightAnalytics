@@ -49,20 +49,29 @@ public final class ApiHandler implements HttpHandler {
     private final Clock clock;
     private final boolean secure;
     private final int regularMinSessions;
+    private final RateLimiter limiter;
+    private final String forwardedSecret;
 
     public ApiHandler(MetricsService metrics, MetricsCache cache, AuthService auth,
-                      Clock clock, boolean secure, int regularMinSessions) {
+                      Clock clock, boolean secure, int regularMinSessions,
+                      RateLimiter limiter, String forwardedSecret) {
         this.metrics = metrics;
         this.cache = cache;
         this.auth = auth;
         this.clock = clock;
         this.secure = secure;
         this.regularMinSessions = regularMinSessions;
+        this.limiter = limiter;
+        this.forwardedSecret = forwardedSecret;
     }
 
     @Override
     public void handle(HttpExchange exchange) throws IOException {
         try {
+            if (!limiter.tryAcquire(WebUtil.clientIp(exchange, forwardedSecret))) {
+                WebUtil.sendJson(exchange, 429, error("too many requests"));
+                return;
+            }
             String path = exchange.getRequestURI().getPath();
             String route = path.length() > 4 ? path.substring(4) : "";
             switch (route) {

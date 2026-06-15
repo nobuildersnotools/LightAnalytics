@@ -7,6 +7,7 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -76,12 +77,52 @@ final class WebUtil {
         return secure ? cookie + "; Secure" : cookie;
     }
 
-    /** Best-effort client IP, used as a rate-limit key. */
-    static String clientIp(HttpExchange exchange) {
+    static final String FORWARDED_SECRET_HEADER = "X-Forwarded-Secret";
+    static final String FORWARDED_FOR_HEADER = "X-Forwarded-For";
+
+    /**
+     * Best-effort client IP, used as a rate-limit key.
+     *
+     * <p>When {@code forwardedSecret} is non-empty, the {@code X-Forwarded-For}
+     * header is honoured only on requests that carry a matching
+     * {@code X-Forwarded-Secret} — i.e. requests that demonstrably came through the
+     * trusted reverse proxy, which is the only party that knows the secret. This is
+     * required when the proxy shares this host's loopback address with untrusted
+     * local processes, which would otherwise be indistinguishable by source IP and
+     * could forge {@code X-Forwarded-For} to poison or evade rate limiting. We take
+     * the right-most forwarded hop, the address the proxy itself observed, since a
+     * client may have prepended its own bogus entries. Absent the secret, forwarded
+     * headers are ignored and the socket peer is used.
+     */
+    static String clientIp(HttpExchange exchange, String forwardedSecret) {
         InetSocketAddress remote = exchange.getRemoteAddress();
-        return remote == null || remote.getAddress() == null
+        String socketIp = remote == null || remote.getAddress() == null
                 ? "unknown"
                 : remote.getAddress().getHostAddress();
+        return resolveClientIp(forwardedSecret,
+                exchange.getRequestHeaders().getFirst(FORWARDED_SECRET_HEADER),
+                exchange.getRequestHeaders().getFirst(FORWARDED_FOR_HEADER),
+                socketIp);
+    }
+
+    /** Pure trust decision behind {@link #clientIp}; see that method for the rationale. */
+    static String resolveClientIp(String forwardedSecret, String providedSecret,
+                                  String forwardedFor, String socketIp) {
+        if (forwardedSecret != null && !forwardedSecret.isEmpty()
+                && providedSecret != null && constantTimeEquals(providedSecret, forwardedSecret)
+                && forwardedFor != null && !forwardedFor.isBlank()) {
+            String[] hops = forwardedFor.split(",");
+            String last = hops[hops.length - 1].trim();
+            if (!last.isEmpty()) {
+                return last;
+            }
+        }
+        return socketIp;
+    }
+
+    private static boolean constantTimeEquals(String a, String b) {
+        return MessageDigest.isEqual(
+                a.getBytes(StandardCharsets.UTF_8), b.getBytes(StandardCharsets.UTF_8));
     }
 
     static void sendJson(HttpExchange exchange, int status, String json) throws IOException {

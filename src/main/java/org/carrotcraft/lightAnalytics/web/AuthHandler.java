@@ -17,12 +17,15 @@ public final class AuthHandler implements HttpHandler {
     private final RateLimiter limiter;
     private final long sessionMaxAgeSeconds;
     private final boolean secure;
+    private final String forwardedSecret;
 
-    public AuthHandler(AuthService auth, RateLimiter limiter, long sessionMaxAgeSeconds, boolean secure) {
+    public AuthHandler(AuthService auth, RateLimiter limiter, long sessionMaxAgeSeconds,
+                       boolean secure, String forwardedSecret) {
         this.auth = auth;
         this.limiter = limiter;
         this.sessionMaxAgeSeconds = sessionMaxAgeSeconds;
         this.secure = secure;
+        this.forwardedSecret = forwardedSecret;
     }
 
     @Override
@@ -32,7 +35,7 @@ public final class AuthHandler implements HttpHandler {
                 WebUtil.sendText(exchange, 405, "Method Not Allowed");
                 return;
             }
-            if (!limiter.tryAcquire(WebUtil.clientIp(exchange))) {
+            if (!limiter.tryAcquire(WebUtil.clientIp(exchange, forwardedSecret))) {
                 WebUtil.sendText(exchange, 429, "Too Many Requests");
                 return;
             }

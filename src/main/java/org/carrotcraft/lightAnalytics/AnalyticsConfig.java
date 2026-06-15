@@ -62,6 +62,8 @@ public final class AnalyticsConfig {
     private static final String KEY_WEB_TLS_ENABLED = "web-tls-enabled";
     private static final String KEY_WEB_TLS_KEYSTORE = "web-tls-keystore";
     private static final String KEY_WEB_TLS_PASSWORD = "web-tls-password";
+    private static final String KEY_WEB_FORWARDED_SECRET = "web-forwarded-secret";
+    private static final String KEY_WEB_SECURE_COOKIES = "web-secure-cookies";
 
     private static final String DEFAULT_FILE = """
             # LightAnalytics configuration.
@@ -123,6 +125,20 @@ public final class AnalyticsConfig {
             # data directory) and its password. Only used when web-tls-enabled = true.
             web-tls-keystore =
             web-tls-password =
+
+            # Shared secret authenticating a trusted reverse proxy. When set, the
+            # dashboard trusts the X-Forwarded-For header (to rate-limit by the real
+            # client IP) only on requests that also carry a matching X-Forwarded-Secret
+            # header. Leave blank to ignore forwarded headers entirely. Required when
+            # the proxy shares this host's loopback with untrusted local processes,
+            # since they cannot then be told apart by source address alone.
+            # In nginx: proxy_set_header X-Forwarded-Secret "<this value>";
+            web-forwarded-secret =
+
+            # Mark session cookies Secure even though this server speaks plain HTTP.
+            # Set this to true when a reverse proxy terminates TLS in front of the
+            # dashboard, so the cookie is never sent over an unencrypted connection.
+            web-secure-cookies = false
             """;
 
     private final Duration sampleInterval;
@@ -144,8 +160,9 @@ public final class AnalyticsConfig {
     }
 
     /**
-     * Web-dashboard settings. {@code publicUrl}, {@code tlsKeystore}, and
-     * {@code tlsPassword} may be empty strings when unset.
+     * Web-dashboard settings. {@code publicUrl}, {@code tlsKeystore},
+     * {@code tlsPassword}, and {@code forwardedSecret} may be empty strings when
+     * unset.
      */
     public record WebConfig(
             boolean enabled,
@@ -157,8 +174,19 @@ public final class AnalyticsConfig {
             int threads,
             boolean tlsEnabled,
             String tlsKeystore,
-            String tlsPassword
+            String tlsPassword,
+            String forwardedSecret,
+            boolean secureCookies
     ) {
+        /**
+         * True when session cookies should carry the {@code Secure} attribute:
+         * either this server is doing TLS itself, or a TLS-terminating proxy in
+         * front of it has been declared via {@code web-secure-cookies}.
+         */
+        public boolean cookiesSecure() {
+            return tlsEnabled || secureCookies;
+        }
+
         /** True when the dashboard is bound to a loopback interface. */
         public boolean isLoopbackBind() {
             return bindAddress.equals("127.0.0.1")
@@ -234,7 +262,9 @@ public final class AnalyticsConfig {
                 (int) positiveLong(values, KEY_WEB_THREADS, DEFAULT_WEB_THREADS, logger),
                 boolValue(values, KEY_WEB_TLS_ENABLED, false, logger),
                 stringValue(values, KEY_WEB_TLS_KEYSTORE, ""),
-                stringValue(values, KEY_WEB_TLS_PASSWORD, "")
+                stringValue(values, KEY_WEB_TLS_PASSWORD, ""),
+                stringValue(values, KEY_WEB_FORWARDED_SECRET, ""),
+                boolValue(values, KEY_WEB_SECURE_COOKIES, false, logger)
         );
     }
 
@@ -242,7 +272,7 @@ public final class AnalyticsConfig {
     private static WebConfig defaultWeb() {
         return new WebConfig(true, DEFAULT_WEB_BIND, DEFAULT_WEB_PORT, "",
                 DEFAULT_WEB_SESSION_TTL, DEFAULT_WEB_TOKEN_TTL, DEFAULT_WEB_THREADS,
-                false, "", "");
+                false, "", "", "", false);
     }
 
     /**

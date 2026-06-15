@@ -21,6 +21,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** End-to-end smoke test of the embedded web server over a real loopback socket. */
@@ -37,16 +38,23 @@ class WebServerTest {
 
     @BeforeEach
     void start(@TempDir Path dir) throws Exception {
-        database = new Database(NOPLogger.NOP_LOGGER, dir);
-        database.open();
-        database.read(connection -> {
-            snapshots.insert(connection, new Snapshot(1_000, 5, 0.1, 0.2, 100, 1000));
-            return Boolean.TRUE;
-        });
+        startWith(dir, false);
+    }
+
+    private void startWith(Path dir, boolean secureCookies) throws Exception {
+        if (server != null) server.stop();
+        if (database == null) {
+            database = new Database(NOPLogger.NOP_LOGGER, dir);
+            database.open();
+            database.read(connection -> {
+                snapshots.insert(connection, new Snapshot(1_000, 5, 0.1, 0.2, 100, 1000));
+                return Boolean.TRUE;
+            });
+        }
         MetricsService metrics = new MetricsService(database, snapshots, sessions, players);
 
         WebConfig config = new WebConfig(true, "127.0.0.1", 0, "",
-                Duration.ofMinutes(120), Duration.ofSeconds(120), 2, false, "", "");
+                Duration.ofMinutes(120), Duration.ofSeconds(120), 2, false, "", "", "", secureCookies);
         auth = new AuthService(config.tokenTtl(), config.sessionTtl());
         server = new WebServer(config, metrics, auth, dir, NOPLogger.NOP_LOGGER, 5);
         server.start();
@@ -120,6 +128,31 @@ class WebServerTest {
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(200, alltime.statusCode());
         assertTrue(alltime.body().contains("\"peakPlayers\":5"));
+    }
+
+    @Test
+    void secureCookiesConfigMarksSessionCookieSecure(@TempDir Path dir) throws Exception {
+        startWith(dir, true);
+        HttpClient client = HttpClient.newBuilder()
+                .followRedirects(HttpClient.Redirect.NEVER)
+                .build();
+        String token = auth.issueToken("tester");
+        HttpResponse<String> authRes = get(client, "/auth?token=" + token);
+        String setCookie = authRes.headers().firstValue("Set-Cookie").orElse("");
+        assertTrue(setCookie.contains("session="));
+        assertTrue(setCookie.contains("Secure"), "cookie should be Secure behind a TLS-terminating proxy");
+    }
+
+    @Test
+    void plainHttpDoesNotMarkSessionCookieSecure() throws Exception {
+        HttpClient client = HttpClient.newBuilder()
+                .followRedirects(HttpClient.Redirect.NEVER)
+                .build();
+        String token = auth.issueToken("tester");
+        HttpResponse<String> authRes = get(client, "/auth?token=" + token);
+        String setCookie = authRes.headers().firstValue("Set-Cookie").orElse("");
+        assertTrue(setCookie.contains("session="));
+        assertFalse(setCookie.contains("Secure"));
     }
 
     @Test

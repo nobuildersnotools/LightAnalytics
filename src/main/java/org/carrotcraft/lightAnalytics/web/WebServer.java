@@ -69,14 +69,19 @@ public final class WebServer {
         }
 
         InetSocketAddress address = new InetSocketAddress(config.bindAddress(), config.port());
-        boolean secure = config.tlsEnabled();
-        server = secure ? createHttps(address) : HttpServer.create(address, 0);
+        boolean tls = config.tlsEnabled();
+        boolean cookieSecure = config.cookiesSecure();
+        String forwardedSecret = config.forwardedSecret();
+        server = tls ? createHttps(address) : HttpServer.create(address, 0);
 
         executor = Executors.newFixedThreadPool(Math.max(1, config.threads()), namedDaemonFactory());
         server.setExecutor(executor);
 
         MetricsCache cache = new MetricsCache();
-        RateLimiter limiter = new RateLimiter(10, 1);
+        RateLimiter authLimiter = new RateLimiter(10, 1);
+        // Shields the single database thread from a request flood; sized well above
+        // the dashboard's own load-and-poll cadence so legitimate use is never hit.
+        RateLimiter apiLimiter = new RateLimiter(30, 5);
         long sessionMaxAge = config.sessionTtl().toSeconds();
 
         SecurityHeaders headers = new SecurityHeaders();
@@ -93,11 +98,12 @@ public final class WebServer {
         health.getFilters().add(headers);
 
         HttpContext authCtx = server.createContext("/auth",
-                new AuthHandler(auth, limiter, sessionMaxAge, secure));
+                new AuthHandler(auth, authLimiter, sessionMaxAge, cookieSecure, forwardedSecret));
         authCtx.getFilters().add(headers);
 
         HttpContext api = server.createContext("/api",
-                new ApiHandler(metrics, cache, auth, clock, secure, regularMinSessions));
+                new ApiHandler(metrics, cache, auth, clock, cookieSecure, regularMinSessions,
+                        apiLimiter, forwardedSecret));
         api.getFilters().add(headers);
         api.getFilters().add(new AuthFilter(auth, true));
 
