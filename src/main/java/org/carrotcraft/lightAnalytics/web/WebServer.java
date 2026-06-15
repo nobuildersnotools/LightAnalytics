@@ -39,22 +39,24 @@ public final class WebServer {
     private final Path dataDirectory;
     private final Logger logger;
     private final Clock clock;
+    private final int regularMinSessions;
 
     private HttpServer server;
     private ExecutorService executor;
 
     public WebServer(WebConfig config, MetricsService metrics, AuthService auth,
-                     Path dataDirectory, Logger logger) {
-        this(config, metrics, auth, dataDirectory, logger, Clock.systemUTC());
+                     Path dataDirectory, Logger logger, int regularMinSessions) {
+        this(config, metrics, auth, dataDirectory, logger, regularMinSessions, Clock.systemUTC());
     }
 
     WebServer(WebConfig config, MetricsService metrics, AuthService auth,
-              Path dataDirectory, Logger logger, Clock clock) {
+              Path dataDirectory, Logger logger, int regularMinSessions, Clock clock) {
         this.config = config;
         this.metrics = metrics;
         this.auth = auth;
         this.dataDirectory = dataDirectory;
         this.logger = logger;
+        this.regularMinSessions = regularMinSessions;
         this.clock = clock;
     }
 
@@ -95,7 +97,7 @@ public final class WebServer {
         authCtx.getFilters().add(headers);
 
         HttpContext api = server.createContext("/api",
-                new ApiHandler(metrics, cache, auth, clock, secure));
+                new ApiHandler(metrics, cache, auth, clock, secure, regularMinSessions));
         api.getFilters().add(headers);
         api.getFilters().add(new AuthFilter(auth, true));
 

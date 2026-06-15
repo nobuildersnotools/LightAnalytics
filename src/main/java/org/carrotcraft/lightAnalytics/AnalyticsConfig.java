@@ -32,6 +32,8 @@ public final class AnalyticsConfig {
     public static final Duration DEFAULT_SNAPSHOT_RETENTION = Duration.ofDays(7);
     /** Default session retention before pruning. */
     public static final Duration DEFAULT_SESSION_RETENTION = Duration.ofDays(90);
+    /** Default session-count threshold above which a player counts as "regular" in a window. */
+    public static final int DEFAULT_REGULAR_MIN_SESSIONS = 5;
 
     /** Default loopback bind address for the web dashboard. */
     public static final String DEFAULT_WEB_BIND = "127.0.0.1";
@@ -49,6 +51,7 @@ public final class AnalyticsConfig {
     private static final String KEY_COMPACTION = "compaction-interval-minutes";
     private static final String KEY_SNAPSHOT_RETENTION = "snapshot-retention-days";
     private static final String KEY_SESSION_RETENTION = "session-retention-days";
+    private static final String KEY_REGULAR_MIN_SESSIONS = "playerbase-regular-min-sessions";
     private static final String KEY_WEB_ENABLED = "web-enabled";
     private static final String KEY_WEB_BIND = "web-bind-address";
     private static final String KEY_WEB_PORT = "web-port";
@@ -79,6 +82,10 @@ public final class AnalyticsConfig {
 
             # Delete sessions that began more than this many days ago.
             session-retention-days = 90
+
+            # A player counts as "regular" in the dashboard's playerbase section when
+            # they begin at least this many sessions within the selected window.
+            playerbase-regular-min-sessions = 5
 
             # --- Web dashboard ---------------------------------------------------
             # An embedded admin web dashboard. Admins run "/lightanalytics web"
@@ -122,14 +129,17 @@ public final class AnalyticsConfig {
     private final Duration compactionInterval;
     private final Duration snapshotRetention;
     private final Duration sessionRetention;
+    private final int regularPlayerMinSessions;
     private final WebConfig web;
 
     private AnalyticsConfig(Duration sampleInterval, Duration compactionInterval,
-                            Duration snapshotRetention, Duration sessionRetention, WebConfig web) {
+                            Duration snapshotRetention, Duration sessionRetention,
+                            int regularPlayerMinSessions, WebConfig web) {
         this.sampleInterval = sampleInterval;
         this.compactionInterval = compactionInterval;
         this.snapshotRetention = snapshotRetention;
         this.sessionRetention = sessionRetention;
+        this.regularPlayerMinSessions = regularPlayerMinSessions;
         this.web = web;
     }
 
@@ -205,6 +215,8 @@ public final class AnalyticsConfig {
                         DEFAULT_SNAPSHOT_RETENTION.toDays(), logger)),
                 Duration.ofDays(positiveLong(values, KEY_SESSION_RETENTION,
                         DEFAULT_SESSION_RETENTION.toDays(), logger)),
+                (int) positiveLong(values, KEY_REGULAR_MIN_SESSIONS,
+                        DEFAULT_REGULAR_MIN_SESSIONS, logger),
                 buildWeb(values, logger)
         );
     }
@@ -262,7 +274,8 @@ public final class AnalyticsConfig {
     /** A config of all built-in defaults, used as the fallback when the file is unusable. */
     public static AnalyticsConfig defaults() {
         return new AnalyticsConfig(DEFAULT_SAMPLE_INTERVAL, DEFAULT_COMPACTION_INTERVAL,
-                DEFAULT_SNAPSHOT_RETENTION, DEFAULT_SESSION_RETENTION, defaultWeb());
+                DEFAULT_SNAPSHOT_RETENTION, DEFAULT_SESSION_RETENTION,
+                DEFAULT_REGULAR_MIN_SESSIONS, defaultWeb());
     }
 
     private static long positiveLong(Map<String, String> values, String key, long fallback, Logger logger) {
@@ -324,6 +337,10 @@ public final class AnalyticsConfig {
 
     public Duration sessionRetention() {
         return sessionRetention;
+    }
+
+    public int regularPlayerMinSessions() {
+        return regularPlayerMinSessions;
     }
 
     public WebConfig web() {

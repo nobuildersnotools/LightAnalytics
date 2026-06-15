@@ -224,6 +224,26 @@ public final class MetricsService {
     }
 
     /**
+     * Playerbase composition over {@code [from, to]}: unique players, the new/returning
+     * split, total joins, and how many qualify as "regular" — those with at least
+     * {@code regularMinSessions} sessions in the window (clamped to a minimum of 1).
+     * Returning is {@code unique - new}, floored at zero (a new player always has a
+     * session in the window, so it cannot legitimately go negative).
+     */
+    public PlayerbaseStats playerbase(long from, long to, int regularMinSessions) {
+        int threshold = Math.max(1, regularMinSessions);
+        return database.read(connection -> {
+            long unique = sessions.uniquePlayersBetween(connection, from, to);
+            long joins = sessions.joinsBetween(connection, from, to);
+            long regular = sessions.regularPlayersBetween(connection, from, to, threshold);
+            long newPlayers = players.firstSeenBetween(connection, from, to).size();
+            long returning = Math.max(0, unique - newPlayers);
+            double avgJoins = unique == 0 ? 0.0 : (double) joins / unique;
+            return new PlayerbaseStats(unique, newPlayers, returning, regular, threshold, joins, avgJoins);
+        });
+    }
+
+    /**
      * Retention of the new-player cohort first seen in {@code [from, to]}: the
      * fraction that started any further session strictly after {@code to}.
      */

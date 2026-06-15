@@ -92,6 +92,55 @@ public final class SessionRepository {
     }
 
     /**
+     * Count of distinct players with at least one session that began within
+     * {@code [fromMillis, toMillis]}. Computed in SQL rather than by materializing
+     * rows because a wide window can span tens of thousands of sessions.
+     */
+    public long uniquePlayersBetween(Connection connection, long fromMillis, long toMillis) throws SQLException {
+        String sql = "SELECT COUNT(DISTINCT uuid) FROM sessions WHERE login_time BETWEEN ? AND ?";
+        return scalarBetween(connection, sql, fromMillis, toMillis);
+    }
+
+    /** Total number of sessions (logins) that began within {@code [fromMillis, toMillis]}. */
+    public long joinsBetween(Connection connection, long fromMillis, long toMillis) throws SQLException {
+        String sql = "SELECT COUNT(*) FROM sessions WHERE login_time BETWEEN ? AND ?";
+        return scalarBetween(connection, sql, fromMillis, toMillis);
+    }
+
+    /**
+     * Count of players who began at least {@code minSessions} sessions within
+     * {@code [fromMillis, toMillis]} — the dashboard's "regular players" figure.
+     * Grouping and counting happen in SQL so the metrics layer never holds the
+     * per-player tallies.
+     */
+    public long regularPlayersBetween(Connection connection, long fromMillis, long toMillis, int minSessions)
+            throws SQLException {
+        String sql = "SELECT COUNT(*) FROM ("
+                + "SELECT uuid FROM sessions WHERE login_time BETWEEN ? AND ? "
+                + "GROUP BY uuid HAVING COUNT(*) >= ?)";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setLong(1, fromMillis);
+            ps.setLong(2, toMillis);
+            ps.setInt(3, minSessions);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getLong(1) : 0L;
+            }
+        }
+    }
+
+    /** Runs a single-aggregate {@code SELECT ... WHERE login_time BETWEEN ? AND ?} query. */
+    private long scalarBetween(Connection connection, String sql, long fromMillis, long toMillis)
+            throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setLong(1, fromMillis);
+            ps.setLong(2, toMillis);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getLong(1) : 0L;
+            }
+        }
+    }
+
+    /**
      * Distinct player UUIDs with at least one session that began strictly after
      * {@code afterMillis}. Returned as a set so the metrics layer can test cohort
      * membership without a per-player query (avoiding an N+1 over players).

@@ -82,7 +82,8 @@ public class LightAnalytics {
         AuthService auth = null;
         if (webConfig.enabled()) {
             auth = new AuthService(webConfig.tokenTtl(), webConfig.sessionTtl());
-            webServer = new WebServer(webConfig, metrics, auth, dataDirectory, logger);
+            webServer = new WebServer(webConfig, metrics, auth, dataDirectory, logger,
+                    config.regularPlayerMinSessions());
             try {
                 webServer.start();
             } catch (Exception e) {

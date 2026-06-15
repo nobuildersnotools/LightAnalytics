@@ -48,7 +48,7 @@ class WebServerTest {
         WebConfig config = new WebConfig(true, "127.0.0.1", 0, "",
                 Duration.ofMinutes(120), Duration.ofSeconds(120), 2, false, "", "");
         auth = new AuthService(config.tokenTtl(), config.sessionTtl());
-        server = new WebServer(config, metrics, auth, dir, NOPLogger.NOP_LOGGER);
+        server = new WebServer(config, metrics, auth, dir, NOPLogger.NOP_LOGGER, 5);
         server.start();
         base = "http://127.0.0.1:" + server.port();
     }

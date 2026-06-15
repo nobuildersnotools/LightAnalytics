@@ -103,6 +103,39 @@ class MetricsServiceTest {
     }
 
     @Test
+    void playerbaseCountsUniqueNewReturningRegularAndJoins() {
+        seedPlayersAndSessions();
+
+        // Wide window covers every seeded session; regular threshold = 2 sessions.
+        PlayerbaseStats wide = metrics.playerbase(1_000, 4_000, 2);
+        assertEquals(4, wide.uniquePlayers());     // p1, p2, p3, p5 (p4 has no session)
+        assertEquals(6, wide.totalJoins());        // p1x2, p2, p3x2, p5
+        assertEquals(4, wide.newPlayers());        // all four first seen in this window
+        assertEquals(0, wide.returningPlayers());
+        assertEquals(2, wide.regularPlayers());    // p1 and p3 each began 2 sessions
+        assertEquals(2, wide.regularThreshold());
+        assertEquals(1.5, wide.avgJoinsPerPlayer(), 1e-9); // 6 joins / 4 unique
+
+        // Later window: p1 (1100) and p3 (1800) were first seen earlier -> returning.
+        PlayerbaseStats later = metrics.playerbase(2_000, 4_000, 2);
+        assertEquals(3, later.uniquePlayers());    // p1@3000, p3@2001, p5@2500
+        assertEquals(1, later.newPlayers());       // only p5 first seen here
+        assertEquals(2, later.returningPlayers()); // p1, p3
+        assertEquals(0, later.regularPlayers());   // one session each within the window
+    }
+
+    @Test
+    void playerbaseIsZeroOnEmptyDatabase() {
+        PlayerbaseStats stats = metrics.playerbase(0, 1_000, 5);
+        assertEquals(0, stats.uniquePlayers());
+        assertEquals(0, stats.totalJoins());
+        assertEquals(0, stats.newPlayers());
+        assertEquals(0, stats.returningPlayers());
+        assertEquals(0, stats.regularPlayers());
+        assertEquals(0.0, stats.avgJoinsPerPlayer(), 1e-9);
+    }
+
+    @Test
     void sessionStatsExcludeGhostsAndOpenSessions() {
         seedPlayersAndSessions();
         SessionStats stats = metrics.sessionStats(1_000, 4_000);

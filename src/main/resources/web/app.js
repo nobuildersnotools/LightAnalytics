@@ -450,6 +450,16 @@ async function loadSummary() {
 
         $("sumNew").textContent = fmtInt(s.newPlayers);
 
+        const pb = s.playerbase;
+        $("pbUnique").textContent = fmtInt(pb.uniquePlayers);
+        $("pbNew").textContent = fmtInt(pb.newPlayers);
+        $("pbReturning").textContent = fmtInt(pb.returningPlayers);
+        $("pbRegular").textContent = fmtInt(pb.regularPlayers);
+        $("pbRegularSub").textContent = "≥ " + pb.regularThreshold
+            + (pb.regularThreshold === 1 ? " session" : " sessions");
+        $("pbJoins").textContent = fmtInt(pb.totalJoins);
+        $("pbJoinsSub").textContent = "avg " + pb.avgJoinsPerPlayer.toFixed(1) + " / player";
+
         $("sumRetention").textContent = s.retention.cohortSize === 0 ? "—" : fmtPct(s.retention.retentionRate, 0);
         setBar($("retentionBar"), s.retention.retentionRate, [0.5, 0.999]);
         // Retention bar: more is better, so invert colour stops manually.

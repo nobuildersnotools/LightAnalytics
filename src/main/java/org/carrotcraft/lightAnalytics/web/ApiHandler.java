@@ -5,6 +5,7 @@ import com.sun.net.httpserver.HttpHandler;
 import org.carrotcraft.lightAnalytics.metrics.AllTimeStats;
 import org.carrotcraft.lightAnalytics.metrics.MetricsService;
 import org.carrotcraft.lightAnalytics.metrics.PeakPlayers;
+import org.carrotcraft.lightAnalytics.metrics.PlayerbaseStats;
 import org.carrotcraft.lightAnalytics.metrics.PopulationChange;
 import org.carrotcraft.lightAnalytics.metrics.ResourceTrends;
 import org.carrotcraft.lightAnalytics.metrics.Retention;
@@ -47,14 +48,16 @@ public final class ApiHandler implements HttpHandler {
     private final AuthService auth;
     private final Clock clock;
     private final boolean secure;
+    private final int regularMinSessions;
 
     public ApiHandler(MetricsService metrics, MetricsCache cache, AuthService auth,
-                      Clock clock, boolean secure) {
+                      Clock clock, boolean secure, int regularMinSessions) {
         this.metrics = metrics;
         this.cache = cache;
         this.auth = auth;
         this.clock = clock;
         this.secure = secure;
+        this.regularMinSessions = regularMinSessions;
     }
 
     @Override
@@ -101,6 +104,7 @@ public final class ApiHandler implements HttpHandler {
             Retention ret = metrics.retention(from, to);
             SessionStats sessions = metrics.sessionStats(from, to);
             ResourceTrends res = metrics.resourceTrends(from, to);
+            PlayerbaseStats base = metrics.playerbase(from, to, regularMinSessions);
             return Json.object()
                     .add("window", label)
                     .add("from", from)
@@ -117,6 +121,15 @@ public final class ApiHandler implements HttpHandler {
                             .add("percentChange", pop.percentChange())
                             .build())
                     .add("newPlayers", metrics.newPlayerCount(from, to))
+                    .addRaw("playerbase", Json.object()
+                            .add("uniquePlayers", base.uniquePlayers())
+                            .add("newPlayers", base.newPlayers())
+                            .add("returningPlayers", base.returningPlayers())
+                            .add("regularPlayers", base.regularPlayers())
+                            .add("regularThreshold", base.regularThreshold())
+                            .add("totalJoins", base.totalJoins())
+                            .add("avgJoinsPerPlayer", base.avgJoinsPerPlayer())
+                            .build())
                     .addRaw("retention", Json.object()
                             .add("cohortSize", ret.cohortSize())
                             .add("retainedCount", ret.retainedCount())
