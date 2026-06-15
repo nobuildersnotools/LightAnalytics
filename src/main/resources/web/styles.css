@@ -368,7 +368,15 @@ section { margin-bottom: clamp(22px, 3.4vw, 38px); }
     letter-spacing: 0.2em;
     text-transform: uppercase;
     color: var(--muted);
+    /* Never intercept wheel/pointer events — the canvas underneath owns
+       scroll-to-zoom, drag-to-pan, and hover. */
+    pointer-events: none;
 }
+
+/* An author `display` declaration overrides the [hidden] UA rule, so the
+   `hidden` attribute would otherwise be ignored and this overlay would cover
+   the canvas permanently. Restore the attribute's effect explicitly. */
+.chart-empty[hidden] { display: none; }
 
 .btn-reset {
     position: absolute;
