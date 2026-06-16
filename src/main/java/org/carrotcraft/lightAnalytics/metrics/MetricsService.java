@@ -1,32 +1,35 @@
 package org.carrotcraft.lightAnalytics.metrics;
 
 import org.carrotcraft.lightAnalytics.model.HourlySnapshot;
-import org.carrotcraft.lightAnalytics.model.PlayerRecord;
-import org.carrotcraft.lightAnalytics.model.PlayerSession;
 import org.carrotcraft.lightAnalytics.model.Snapshot;
 import org.carrotcraft.lightAnalytics.storage.Database;
 import org.carrotcraft.lightAnalytics.storage.PlayerRepository;
 import org.carrotcraft.lightAnalytics.storage.SessionRepository;
 import org.carrotcraft.lightAnalytics.storage.SnapshotRepository;
+import org.carrotcraft.lightAnalytics.storage.SnapshotRepository.Aggregate;
+import org.carrotcraft.lightAnalytics.storage.SnapshotRepository.PeakRow;
 
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 
 /**
- * Phase 2 metrics layer. Composes the raw range accessors on the storage
- * repositories into the figures the project reports (peak/population, churn,
- * playtime, resource trends). It deliberately holds no aggregation logic in the
- * repositories: it fetches rows via {@link Database#read} and interprets them
- * here, adding purpose-built aggregate methods to the repos only where a pure-SQL
- * aggregate is clearly leaner (e.g. the hourly rollup).
+ * Phase 2 metrics layer. Composes the storage repositories into the figures the
+ * project reports (peak/population, churn, playtime, resource trends).
+ *
+ * <p>Snapshot- and session-derived figures are computed with SQL aggregates rather
+ * than by materializing rows: a wide window can span tens of thousands of snapshot
+ * or session rows, and pulling those across the single database thread to sum/peak
+ * them in Java is pure waste. Only {@link #series} and {@link #populationSeries},
+ * which genuinely need per-row data, still fetch rows.
  *
  * <p>Windows are half-open-friendly {@code [from, to]} epoch-millisecond ranges.
  * Snapshot-derived figures recombine full-resolution snapshots with any hourly
  * rollups the window spans, so they remain correct beyond the full-resolution
- * retention horizon.
+ * retention horizon. The two resolutions are disjoint in time by construction
+ * (compaction deletes raw rows only after rolling them up), so an hourly bucket's
+ * sample-count-weighted aggregate adds directly to the raw aggregate.
  */
 public final class MetricsService {
 
@@ -46,19 +49,57 @@ public final class MetricsService {
         this.players = players;
     }
 
+    /**
+     * Every windowed figure the admin summary and dashboard report, gathered on a
+     * single database connection in one {@link Database#read}. This replaces the
+     * previous fan-out of seven independent reads — several of which re-ran the same
+     * window scan — with one pass: the current-window snapshot aggregates and the
+     * new-player cohort count are each computed once and shared across the figures
+     * that need them. The dashboard's playerbase strip is fetched separately via
+     * {@link #playerbase} (the in-game command does not use it).
+     */
+    public Summary summary(long from, long to) {
+        return database.read(connection -> {
+            Aggregate raw = snapshots.aggregateRaw(connection, from, to);
+            Aggregate hourly = snapshots.aggregateHourly(connection, from, to);
+
+            PlayerCounts counts = playerCounts(connection, from, to, raw, hourly);
+            PeakPlayers peak = new PeakPlayers(counts.peak(), counts.peakAt());
+            PopulationChange population = populationChange(connection, from, to, counts.avg());
+            ResourceTrends resources = resourceTrends(raw, hourly);
+
+            long cohort = players.firstSeenCount(connection, from, to);
+            long retained = players.retainedCount(connection, from, to, to);
+            Retention retention = new Retention((int) cohort, (int) retained,
+                    cohort == 0 ? 0.0 : (double) retained / cohort);
+
+            return new Summary(
+                    currentPopulation(connection),
+                    peak,
+                    population,
+                    (int) cohort,
+                    retention,
+                    sessionStats(connection, from, to),
+                    resources
+            );
+        });
+    }
+
     /** Current connected population, taken from the most recent snapshot (0 if none yet). */
     public int currentPopulation() {
-        return database.read(connection -> {
-            Snapshot latest = snapshots.latest(connection);
-            return latest == null ? 0 : latest.playerCount();
-        });
+        return database.read(this::currentPopulation);
+    }
+
+    private int currentPopulation(Connection connection) throws SQLException {
+        Snapshot latest = snapshots.latest(connection);
+        return latest == null ? 0 : latest.playerCount();
     }
 
     /** Highest concurrent player count over {@code [from, to]} and when it occurred. */
     public PeakPlayers peakPlayers(long from, long to) {
         return database.read(connection -> {
             PlayerCounts counts = playerCounts(connection, from, to);
-            return new PeakPlayers(counts.peak, counts.peakAt);
+            return new PeakPlayers(counts.peak(), counts.peakAt());
         });
     }
 
@@ -206,21 +247,22 @@ public final class MetricsService {
      * window of equal length.
      */
     public PopulationChange populationChange(long from, long to) {
+        return database.read(connection -> populationChange(connection, from, to,
+                playerCounts(connection, from, to).avg()));
+    }
+
+    private PopulationChange populationChange(Connection connection, long from, long to, double currentAvg)
+            throws SQLException {
         long length = to - from;
-        long prevTo = from - 1;
-        long prevFrom = from - length;
-        return database.read(connection -> {
-            double currentAvg = playerCounts(connection, from, to).avg;
-            double previousAvg = playerCounts(connection, prevFrom, prevTo).avg;
-            double absolute = currentAvg - previousAvg;
-            double percent = previousAvg == 0.0 ? 0.0 : absolute / previousAvg;
-            return new PopulationChange(currentAvg, previousAvg, absolute, percent);
-        });
+        double previousAvg = playerCounts(connection, from - length, from - 1).avg();
+        double absolute = currentAvg - previousAvg;
+        double percent = previousAvg == 0.0 ? 0.0 : absolute / previousAvg;
+        return new PopulationChange(currentAvg, previousAvg, absolute, percent);
     }
 
     /** Number of players whose first-ever login fell within {@code [from, to]}. */
     public int newPlayerCount(long from, long to) {
-        return database.read(connection -> players.firstSeenBetween(connection, from, to).size());
+        return database.read(connection -> (int) players.firstSeenCount(connection, from, to));
     }
 
     /**
@@ -236,7 +278,7 @@ public final class MetricsService {
             long unique = sessions.uniquePlayersBetween(connection, from, to);
             long joins = sessions.joinsBetween(connection, from, to);
             long regular = sessions.regularPlayersBetween(connection, from, to, threshold);
-            long newPlayers = players.firstSeenBetween(connection, from, to).size();
+            long newPlayers = players.firstSeenCount(connection, from, to);
             long returning = Math.max(0, unique - newPlayers);
             double avgJoins = unique == 0 ? 0.0 : (double) joins / unique;
             return new PlayerbaseStats(unique, newPlayers, returning, regular, threshold, joins, avgJoins);
@@ -249,131 +291,121 @@ public final class MetricsService {
      */
     public Retention retention(long from, long to) {
         return database.read(connection -> {
-            List<PlayerRecord> cohort = players.firstSeenBetween(connection, from, to);
-            Set<java.util.UUID> returners = sessions.distinctUuidsWithLoginAfter(connection, to);
-            int retained = 0;
-            for (PlayerRecord player : cohort) {
-                if (returners.contains(player.uuid())) {
-                    retained++;
-                }
-            }
-            double rate = cohort.isEmpty() ? 0.0 : (double) retained / cohort.size();
-            return new Retention(cohort.size(), retained, rate);
+            long cohort = players.firstSeenCount(connection, from, to);
+            long retained = players.retainedCount(connection, from, to, to);
+            double rate = cohort == 0 ? 0.0 : (double) retained / cohort;
+            return new Retention((int) cohort, (int) retained, rate);
         });
     }
 
     /** Playtime statistics over sessions that began within {@code [from, to]}. */
     public SessionStats sessionStats(long from, long to) {
-        return database.read(connection -> {
-            List<PlayerSession> windowSessions = sessions.between(connection, from, to);
-            long counted = 0;
-            long totalPlaytime = 0;
-            long ghosts = 0;
-            long open = 0;
-            for (PlayerSession session : windowSessions) {
-                Long logout = session.logoutTime();
-                if (logout == null) {
-                    open++;
-                    continue;
-                }
-                long duration = logout - session.loginTime();
-                if (duration < MIN_SESSION_MILLIS) {
-                    ghosts++;
-                    continue;
-                }
-                counted++;
-                totalPlaytime += duration;
-            }
-            double avg = counted == 0 ? 0.0 : (double) totalPlaytime / counted;
-            return new SessionStats(counted, avg, totalPlaytime, ghosts, open);
-        });
+        return database.read(connection -> sessionStats(connection, from, to));
+    }
+
+    private SessionStats sessionStats(Connection connection, long from, long to) throws SQLException {
+        SessionRepository.Playtime pt = sessions.playtimeStats(connection, from, to, MIN_SESSION_MILLIS);
+        double avg = pt.countedSessions() == 0
+                ? 0.0
+                : (double) pt.totalPlaytimeMillis() / pt.countedSessions();
+        return new SessionStats(pt.countedSessions(), avg, pt.totalPlaytimeMillis(),
+                pt.ghostSessions(), pt.openSessions());
     }
 
     /** Average/peak proxy-JVM CPU and heap usage over {@code [from, to]}. */
     public ResourceTrends resourceTrends(long from, long to) {
-        return database.read(connection -> {
-            List<Snapshot> raw = snapshots.between(connection, from, to);
-            List<HourlySnapshot> hourly = snapshots.hourlyBetween(connection, from, to);
-
-            double cpuProcessSum = 0;
-            double cpuSystemSum = 0;
-            double heapUsedSum = 0;
-            long samples = 0;
-            double cpuProcessPeak = 0;
-            double cpuSystemPeak = 0;
-            long heapUsedPeak = 0;
-            long heapMax = 0;
-            boolean any = false;
-
-            for (Snapshot s : raw) {
-                cpuProcessSum += s.cpuProcessLoad();
-                cpuSystemSum += s.cpuSystemLoad();
-                heapUsedSum += s.heapUsed();
-                samples++;
-                if (!any || s.cpuProcessLoad() > cpuProcessPeak) cpuProcessPeak = s.cpuProcessLoad();
-                if (!any || s.cpuSystemLoad() > cpuSystemPeak) cpuSystemPeak = s.cpuSystemLoad();
-                if (!any || s.heapUsed() > heapUsedPeak) heapUsedPeak = s.heapUsed();
-                if (!any || s.heapMax() > heapMax) heapMax = s.heapMax();
-                any = true;
-            }
-            for (HourlySnapshot h : hourly) {
-                cpuProcessSum += h.cpuProcessAvg() * h.sampleCount();
-                cpuSystemSum += h.cpuSystemAvg() * h.sampleCount();
-                heapUsedSum += h.heapUsedAvg() * h.sampleCount();
-                samples += h.sampleCount();
-                if (!any || h.cpuProcessMax() > cpuProcessPeak) cpuProcessPeak = h.cpuProcessMax();
-                if (!any || h.cpuSystemMax() > cpuSystemPeak) cpuSystemPeak = h.cpuSystemMax();
-                if (!any || h.heapUsedMax() > heapUsedPeak) heapUsedPeak = h.heapUsedMax();
-                if (!any || h.heapMax() > heapMax) heapMax = h.heapMax();
-                any = true;
-            }
-
-            if (samples == 0) {
-                return new ResourceTrends(0, 0, 0, 0, 0, 0, 0, 0);
-            }
-            return new ResourceTrends(
-                    cpuProcessSum / samples,
-                    cpuProcessPeak,
-                    cpuSystemSum / samples,
-                    cpuSystemPeak,
-                    heapUsedSum / samples,
-                    heapUsedPeak,
-                    heapMax,
-                    samples
-            );
-        });
+        return database.read(connection -> resourceTrends(
+                snapshots.aggregateRaw(connection, from, to),
+                snapshots.aggregateHourly(connection, from, to)));
     }
 
     /**
-     * Recombines player counts over a window from full-resolution snapshots and
-     * any hourly rollups it spans. Raw samples weight 1 each; an hourly bucket
-     * contributes its mean weighted by its sample count, and its stored max to the
-     * peak. The two resolutions are disjoint in time by construction (compaction
-     * deletes raw rows only after rolling them up), so there is no double counting.
+     * Recombines CPU/heap trends from the raw and hourly aggregates of a window.
+     * Sums add directly (the hourly aggregate is already sample-count weighted) and
+     * peaks take the larger of the two — but only across resolutions that actually
+     * contributed samples, so an absent resolution never pulls a peak toward zero
+     * (process CPU load can legitimately be negative when unavailable).
      */
+    private ResourceTrends resourceTrends(Aggregate raw, Aggregate hourly) {
+        long samples = raw.sampleCount() + hourly.sampleCount();
+        if (samples == 0) {
+            return new ResourceTrends(0, 0, 0, 0, 0, 0, 0, 0);
+        }
+        boolean hadRaw = raw.sampleCount() > 0;
+        double cpuProcessPeak = hadRaw ? raw.cpuProcessPeak() : 0;
+        double cpuSystemPeak = hadRaw ? raw.cpuSystemPeak() : 0;
+        long heapUsedPeak = hadRaw ? raw.heapUsedPeak() : 0;
+        long heapMax = hadRaw ? raw.heapMax() : 0;
+        if (hourly.sampleCount() > 0) {
+            if (!hadRaw || hourly.cpuProcessPeak() > cpuProcessPeak) cpuProcessPeak = hourly.cpuProcessPeak();
+            if (!hadRaw || hourly.cpuSystemPeak() > cpuSystemPeak) cpuSystemPeak = hourly.cpuSystemPeak();
+            if (!hadRaw || hourly.heapUsedPeak() > heapUsedPeak) heapUsedPeak = hourly.heapUsedPeak();
+            if (!hadRaw || hourly.heapMax() > heapMax) heapMax = hourly.heapMax();
+        }
+        double cpuProcessSum = raw.cpuProcessSum() + hourly.cpuProcessSum();
+        double cpuSystemSum = raw.cpuSystemSum() + hourly.cpuSystemSum();
+        double heapUsedSum = raw.heapUsedSum() + hourly.heapUsedSum();
+        return new ResourceTrends(
+                cpuProcessSum / samples,
+                cpuProcessPeak,
+                cpuSystemSum / samples,
+                cpuSystemPeak,
+                heapUsedSum / samples,
+                heapUsedPeak,
+                heapMax,
+                samples
+        );
+    }
+
+    /** Fetches and combines a window's player-count aggregates. */
     private PlayerCounts playerCounts(Connection connection, long from, long to) throws SQLException {
-        double sum = 0;
-        long samples = 0;
+        return playerCounts(connection, from, to,
+                snapshots.aggregateRaw(connection, from, to),
+                snapshots.aggregateHourly(connection, from, to));
+    }
+
+    /**
+     * Combines player counts over a window from already-fetched raw and hourly
+     * aggregates. The average is the sample-count-weighted mean across both
+     * resolutions; the peak takes the larger of the two stored maxima (raw winning
+     * ties, matching the prior row-by-row behaviour) and its exact timestamp/bucket
+     * via a bounded {@code ORDER BY ... LIMIT 1} lookup, run only for the resolution
+     * that actually holds the peak.
+     */
+    private PlayerCounts playerCounts(Connection connection, long from, long to, Aggregate raw, Aggregate hourly)
+            throws SQLException {
+        long samples = raw.sampleCount() + hourly.sampleCount();
+        double avg = samples == 0 ? 0.0 : (raw.playerSum() + hourly.playerSum()) / samples;
+
+        boolean hadRaw = raw.sampleCount() > 0;
         int peak = 0;
         long peakAt = -1;
-        for (Snapshot s : snapshots.between(connection, from, to)) {
-            sum += s.playerCount();
-            samples++;
-            if (peakAt == -1 || s.playerCount() > peak) {
-                peak = s.playerCount();
-                peakAt = s.timestamp();
+        if (hadRaw) {
+            PeakRow r = snapshots.peakPlayerRaw(connection, from, to);
+            if (r != null) {
+                peak = r.peak();
+                peakAt = r.at();
             }
         }
-        for (HourlySnapshot h : snapshots.hourlyBetween(connection, from, to)) {
-            sum += h.playerCountAvg() * h.sampleCount();
-            samples += h.sampleCount();
-            if (peakAt == -1 || h.playerCountMax() > peak) {
-                peak = h.playerCountMax();
-                peakAt = h.bucketStart();
+        if (hourly.sampleCount() > 0 && (!hadRaw || hourly.playerPeak() > peak)) {
+            PeakRow h = snapshots.peakHourlyInRange(connection, from, to);
+            if (h != null) {
+                peak = h.peak();
+                peakAt = h.at();
             }
         }
-        double avg = samples == 0 ? 0.0 : sum / samples;
         return new PlayerCounts(peak, peakAt, avg);
+    }
+
+    /** Every windowed figure the summary report and dashboard summary endpoint share. */
+    public record Summary(
+            int currentPopulation,
+            PeakPlayers peak,
+            PopulationChange population,
+            int newPlayers,
+            Retention retention,
+            SessionStats sessions,
+            ResourceTrends resources) {
     }
 
     /** Internal carrier for the combined player-count aggregation. */

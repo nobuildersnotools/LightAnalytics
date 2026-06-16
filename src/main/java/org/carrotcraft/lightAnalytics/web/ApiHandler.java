@@ -34,6 +34,9 @@ public final class ApiHandler implements HttpHandler {
 
     private static final long SUMMARY_TTL_MILLIS = 10_000L;
     private static final long ALLTIME_TTL_MILLIS = 60_000L;
+    private static final long SERIES_TTL_MILLIS = 10_000L;
+    /** Quantum for series cache keys, so near-identical zoom/pan ranges share a cached payload. */
+    private static final long SERIES_KEY_QUANTUM_MILLIS = 30_000L;
     private static final int DEFAULT_MAX_POINTS = 1000;
     private static final int MAX_POINTS_CAP = 5000;
 
@@ -101,24 +104,24 @@ public final class ApiHandler implements HttpHandler {
     }
 
     private void summary(HttpExchange exchange) throws IOException {
-        String label = WINDOWS.containsKey(WebUtil.queryParams(exchange).get("window"))
-                ? WebUtil.queryParams(exchange).get("window")
-                : "24h";
+        String requested = WebUtil.queryParams(exchange).get("window");
+        String label = WINDOWS.containsKey(requested) ? requested : "24h";
         Duration window = WINDOWS.get(label);
         String json = cache.get("summary:" + label, SUMMARY_TTL_MILLIS, () -> {
             long to = clock.millis();
             long from = to - window.toMillis();
-            PeakPlayers peak = metrics.peakPlayers(from, to);
-            PopulationChange pop = metrics.populationChange(from, to);
-            Retention ret = metrics.retention(from, to);
-            SessionStats sessions = metrics.sessionStats(from, to);
-            ResourceTrends res = metrics.resourceTrends(from, to);
+            MetricsService.Summary summary = metrics.summary(from, to);
+            PeakPlayers peak = summary.peak();
+            PopulationChange pop = summary.population();
+            Retention ret = summary.retention();
+            SessionStats sessions = summary.sessions();
+            ResourceTrends res = summary.resources();
             PlayerbaseStats base = metrics.playerbase(from, to, regularMinSessions);
             return Json.object()
                     .add("window", label)
                     .add("from", from)
                     .add("to", to)
-                    .add("currentPopulation", metrics.currentPopulation())
+                    .add("currentPopulation", summary.currentPopulation())
                     .addRaw("peak", Json.object()
                             .add("peak", peak.peak())
                             .add("at", peak.atTimestamp())
@@ -129,7 +132,7 @@ public final class ApiHandler implements HttpHandler {
                             .add("absoluteChange", pop.absoluteChange())
                             .add("percentChange", pop.percentChange())
                             .build())
-                    .add("newPlayers", metrics.newPlayerCount(from, to))
+                    .add("newPlayers", summary.newPlayers())
                     .addRaw("playerbase", Json.object()
                             .add("uniquePlayers", base.uniquePlayers())
                             .add("newPlayers", base.newPlayers())
@@ -192,23 +195,30 @@ public final class ApiHandler implements HttpHandler {
             WebUtil.sendJson(exchange, 400, error("from must be before to"));
             return;
         }
-        List<SeriesPoint> points = metrics.series(from, to, maxPoints);
-        Json.JsonArray array = Json.array();
-        for (SeriesPoint p : points) {
-            array.addRaw(Json.object()
-                    .add("t", p.timestamp())
-                    .add("players", p.playerCount())
-                    .add("cpuProcess", p.cpuProcess())
-                    .add("cpuSystem", p.cpuSystem())
-                    .add("heapUsed", p.heapUsed())
-                    .add("heapMax", p.heapMax())
-                    .build());
-        }
-        String json = Json.object()
-                .add("from", from)
-                .add("to", to)
-                .addRaw("points", array.build())
-                .build();
+        // Series is the heaviest read; quantize the range into the cache key so a
+        // user's stream of zoom/pan requests collapses onto one DB pass per TTL.
+        long keyFrom = from - Math.floorMod(from, SERIES_KEY_QUANTUM_MILLIS);
+        long keyTo = to - Math.floorMod(to, SERIES_KEY_QUANTUM_MILLIS);
+        String cacheKey = "series:" + keyFrom + ":" + keyTo + ":" + maxPoints;
+        String json = cache.get(cacheKey, SERIES_TTL_MILLIS, () -> {
+            List<SeriesPoint> points = metrics.series(from, to, maxPoints);
+            Json.JsonArray array = Json.array();
+            for (SeriesPoint p : points) {
+                array.addRaw(Json.object()
+                        .add("t", p.timestamp())
+                        .add("players", p.playerCount())
+                        .add("cpuProcess", p.cpuProcess())
+                        .add("cpuSystem", p.cpuSystem())
+                        .add("heapUsed", p.heapUsed())
+                        .add("heapMax", p.heapMax())
+                        .build());
+            }
+            return Json.object()
+                    .add("from", from)
+                    .add("to", to)
+                    .addRaw("points", array.build())
+                    .build();
+        });
         WebUtil.sendJson(exchange, 200, json);
     }
 

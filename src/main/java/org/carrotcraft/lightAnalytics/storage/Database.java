@@ -16,7 +16,9 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Owns the embedded SQLite connection and serializes all database access onto a
@@ -44,6 +46,14 @@ public final class Database implements AutoCloseable {
     }
 
     private static final String SCHEMA_RESOURCE = "/schema.sql";
+
+    /**
+     * How long a {@link #read} waits for the single database thread before giving
+     * up. A read can queue behind a write or a compaction pass, so this is generous;
+     * its purpose is to stop a wedged database thread from blocking a caller (an HTTP
+     * worker from the bounded web pool, or a Velocity event/command thread) forever.
+     */
+    private static final long READ_TIMEOUT_SECONDS = 30L;
 
     private final Logger logger;
     private final Path databaseFile;
@@ -109,13 +119,21 @@ public final class Database implements AutoCloseable {
         });
     }
 
-    /** Runs a query on the background thread and blocks until it returns. */
+    /**
+     * Runs a query on the background thread and blocks until it returns, up to
+     * {@link #READ_TIMEOUT_SECONDS}. A timeout throws rather than hanging the
+     * caller; the queued task is cancelled if it has not yet started.
+     */
     public <T> T read(SqlFunction<T> work) {
         Callable<T> task = () -> work.apply(connection);
+        Future<T> future = writer.submit(task);
         try {
-            return writer.submit(task).get();
+            return future.get(READ_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         } catch (ExecutionException e) {
             throw new IllegalStateException("Database read failed", e.getCause());
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            throw new IllegalStateException("Database read timed out after " + READ_TIMEOUT_SECONDS + "s", e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Interrupted during database read", e);

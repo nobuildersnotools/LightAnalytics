@@ -6,8 +6,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.UUID;
 
 /**
@@ -52,23 +50,37 @@ public final class PlayerRepository {
     }
 
     /**
-     * Players whose {@code first_seen} falls within {@code [fromMillis, toMillis]},
-     * oldest first. This is the raw cohort the metrics layer uses for new-player
-     * rate and retention; interpretation stays out of the repository.
+     * Count of players whose {@code first_seen} falls within {@code [fromMillis, toMillis]}
+     * — the new-player cohort size. Computed in SQL (backed by {@code idx_players_first_seen})
+     * so the metrics layer never materializes the cohort rows.
      */
-    public List<PlayerRecord> firstSeenBetween(Connection connection, long fromMillis, long toMillis)
-            throws SQLException {
-        String sql = "SELECT uuid, username, first_seen, last_seen, total_sessions "
-                + "FROM players WHERE first_seen BETWEEN ? AND ? ORDER BY first_seen ASC";
+    public long firstSeenCount(Connection connection, long fromMillis, long toMillis) throws SQLException {
+        String sql = "SELECT COUNT(*) FROM players WHERE first_seen BETWEEN ? AND ?";
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setLong(1, fromMillis);
             ps.setLong(2, toMillis);
             try (ResultSet rs = ps.executeQuery()) {
-                List<PlayerRecord> results = new ArrayList<>();
-                while (rs.next()) {
-                    results.add(map(rs));
-                }
-                return results;
+                return rs.next() ? rs.getLong(1) : 0L;
+            }
+        }
+    }
+
+    /**
+     * Count of the new-player cohort first seen in {@code [fromMillis, toMillis]} that
+     * began at least one further session strictly after {@code afterMillis} — i.e. the
+     * retained members. The membership test runs as a SQL {@code EXISTS} so neither the
+     * cohort nor the returner set is transferred to the metrics layer.
+     */
+    public long retainedCount(Connection connection, long fromMillis, long toMillis, long afterMillis)
+            throws SQLException {
+        String sql = "SELECT COUNT(*) FROM players p WHERE p.first_seen BETWEEN ? AND ? "
+                + "AND EXISTS (SELECT 1 FROM sessions s WHERE s.uuid = p.uuid AND s.login_time > ?)";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setLong(1, fromMillis);
+            ps.setLong(2, toMillis);
+            ps.setLong(3, afterMillis);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getLong(1) : 0L;
             }
         }
     }

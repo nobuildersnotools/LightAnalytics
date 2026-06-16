@@ -8,9 +8,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -71,6 +69,43 @@ public final class SessionRepository {
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setLong(1, logoutTime);
             return ps.executeUpdate();
+        }
+    }
+
+    /** Playtime aggregate over sessions begun in a window; see {@link #playtimeStats}. */
+    public record Playtime(long countedSessions, long openSessions, long ghostSessions, long totalPlaytimeMillis) {
+    }
+
+    /**
+     * Aggregates playtime over sessions that began within {@code [fromMillis, toMillis]},
+     * computed in SQL so the metrics layer never materializes the session rows. A closed
+     * session shorter than {@code minMillis} is a ghost (excluded); a session with no
+     * logout is still open (excluded). Counted playtime sums only the closed,
+     * non-ghost sessions.
+     */
+    public Playtime playtimeStats(Connection connection, long fromMillis, long toMillis, long minMillis)
+            throws SQLException {
+        String sql = "SELECT "
+                + "COALESCE(SUM(CASE WHEN logout_time IS NOT NULL AND logout_time - login_time >= ? "
+                + "THEN 1 ELSE 0 END), 0), "
+                + "COALESCE(SUM(CASE WHEN logout_time IS NULL THEN 1 ELSE 0 END), 0), "
+                + "COALESCE(SUM(CASE WHEN logout_time IS NOT NULL AND logout_time - login_time < ? "
+                + "THEN 1 ELSE 0 END), 0), "
+                + "COALESCE(SUM(CASE WHEN logout_time IS NOT NULL AND logout_time - login_time >= ? "
+                + "THEN logout_time - login_time ELSE 0 END), 0) "
+                + "FROM sessions WHERE login_time BETWEEN ? AND ?";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setLong(1, minMillis);
+            ps.setLong(2, minMillis);
+            ps.setLong(3, minMillis);
+            ps.setLong(4, fromMillis);
+            ps.setLong(5, toMillis);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return new Playtime(0, 0, 0, 0);
+                }
+                return new Playtime(rs.getLong(1), rs.getLong(2), rs.getLong(3), rs.getLong(4));
+            }
         }
     }
 
@@ -136,25 +171,6 @@ public final class SessionRepository {
             ps.setLong(2, toMillis);
             try (ResultSet rs = ps.executeQuery()) {
                 return rs.next() ? rs.getLong(1) : 0L;
-            }
-        }
-    }
-
-    /**
-     * Distinct player UUIDs with at least one session that began strictly after
-     * {@code afterMillis}. Returned as a set so the metrics layer can test cohort
-     * membership without a per-player query (avoiding an N+1 over players).
-     */
-    public Set<UUID> distinctUuidsWithLoginAfter(Connection connection, long afterMillis) throws SQLException {
-        String sql = "SELECT DISTINCT uuid FROM sessions WHERE login_time > ?";
-        try (PreparedStatement ps = connection.prepareStatement(sql)) {
-            ps.setLong(1, afterMillis);
-            try (ResultSet rs = ps.executeQuery()) {
-                Set<UUID> results = new HashSet<>();
-                while (rs.next()) {
-                    results.add(UUID.fromString(rs.getString("uuid")));
-                }
-                return results;
             }
         }
     }

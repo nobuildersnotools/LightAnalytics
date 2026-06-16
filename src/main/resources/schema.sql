@@ -9,6 +9,13 @@ CREATE TABLE IF NOT EXISTS players (
     total_sessions INTEGER NOT NULL DEFAULT 0
 );
 
+-- New-player cohort, retention, and playerbase metrics all filter players by
+-- first_seen over a window. Without this index that is a full table scan that
+-- grows for the life of the server (players are never pruned). NOTE the loader
+-- splits this file on the semicolon character, so comments here must not contain
+-- one (a stray one would be parsed as a statement terminator).
+CREATE INDEX IF NOT EXISTS idx_players_first_seen ON players (first_seen);
+
 CREATE TABLE IF NOT EXISTS sessions (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     uuid        TEXT    NOT NULL,

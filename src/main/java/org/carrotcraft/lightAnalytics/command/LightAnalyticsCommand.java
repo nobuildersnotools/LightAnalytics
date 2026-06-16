@@ -51,17 +51,18 @@ public final class LightAnalyticsCommand implements SimpleCommand {
         long to = clock.millis();
         long from = to - window.duration().toMillis();
         try {
+            MetricsService.Summary summary = metrics.summary(from, to);
             SummaryReport report = new SummaryReport(
                     window,
                     from,
                     to,
-                    metrics.currentPopulation(),
-                    metrics.peakPlayers(from, to),
-                    metrics.populationChange(from, to),
-                    metrics.newPlayerCount(from, to),
-                    metrics.retention(from, to),
-                    metrics.sessionStats(from, to),
-                    metrics.resourceTrends(from, to)
+                    summary.currentPopulation(),
+                    summary.peak(),
+                    summary.population(),
+                    summary.newPlayers(),
+                    summary.retention(),
+                    summary.sessions(),
+                    summary.resources()
             );
             send(invocation, formatter.format(report));
         } catch (RuntimeException e) {

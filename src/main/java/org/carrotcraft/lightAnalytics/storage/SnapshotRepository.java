@@ -23,6 +23,33 @@ public final class SnapshotRepository {
     /** Width of an hourly rollup bucket, in milliseconds. */
     public static final long HOUR_MILLIS = 3_600_000L;
 
+    /**
+     * Pre-aggregated snapshot figures over a window, computed in SQL so the metrics
+     * layer never materializes the underlying rows. The same shape serves both
+     * resolutions: for raw snapshots {@code sampleCount} is the row count and the
+     * sums are plain column sums; for hourly rollups {@code sampleCount} is the sum
+     * of per-bucket sample counts and the sums are sample-count-weighted (so the two
+     * resolutions recombine by simple addition). Maxes are meaningful only when
+     * {@code sampleCount > 0}.
+     */
+    public record Aggregate(
+            long sampleCount,
+            double playerSum,
+            int playerPeak,
+            double cpuProcessSum,
+            double cpuProcessPeak,
+            double cpuSystemSum,
+            double cpuSystemPeak,
+            double heapUsedSum,
+            long heapUsedPeak,
+            long heapMax) {
+        public static final Aggregate EMPTY = new Aggregate(0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    }
+
+    /** A peak player count and the (earliest) timestamp at which it occurred. */
+    public record PeakRow(int peak, long at) {
+    }
+
     public void insert(Connection connection, Snapshot snapshot) throws SQLException {
         String sql = "INSERT OR REPLACE INTO snapshots "
                 + "(timestamp, player_count, cpu_process, cpu_system, heap_used, heap_max) "
@@ -51,6 +78,91 @@ public final class SnapshotRepository {
                     results.add(map(rs));
                 }
                 return results;
+            }
+        }
+    }
+
+    /**
+     * Aggregates full-resolution snapshots in {@code [fromMillis, toMillis]} in SQL.
+     * Returns {@link Aggregate#EMPTY} when the window holds no rows.
+     */
+    public Aggregate aggregateRaw(Connection connection, long fromMillis, long toMillis) throws SQLException {
+        String sql = "SELECT COUNT(*), "
+                + "COALESCE(SUM(player_count), 0), COALESCE(MAX(player_count), 0), "
+                + "COALESCE(SUM(cpu_process), 0), COALESCE(MAX(cpu_process), 0), "
+                + "COALESCE(SUM(cpu_system), 0), COALESCE(MAX(cpu_system), 0), "
+                + "COALESCE(SUM(heap_used), 0), COALESCE(MAX(heap_used), 0), COALESCE(MAX(heap_max), 0) "
+                + "FROM snapshots WHERE timestamp BETWEEN ? AND ?";
+        return aggregate(connection, sql, fromMillis, toMillis);
+    }
+
+    /**
+     * Aggregates hourly rollups in {@code [fromMillis, toMillis]} in SQL, weighting
+     * each bucket's averages by its sample count so the result recombines with
+     * {@link #aggregateRaw} by addition. Returns {@link Aggregate#EMPTY} when empty.
+     */
+    public Aggregate aggregateHourly(Connection connection, long fromMillis, long toMillis) throws SQLException {
+        String sql = "SELECT COALESCE(SUM(sample_count), 0), "
+                + "COALESCE(SUM(player_count_avg * sample_count), 0), COALESCE(MAX(player_count_max), 0), "
+                + "COALESCE(SUM(cpu_process_avg * sample_count), 0), COALESCE(MAX(cpu_process_max), 0), "
+                + "COALESCE(SUM(cpu_system_avg * sample_count), 0), COALESCE(MAX(cpu_system_max), 0), "
+                + "COALESCE(SUM(heap_used_avg * sample_count), 0), COALESCE(MAX(heap_used_max), 0), "
+                + "COALESCE(MAX(heap_max), 0) "
+                + "FROM snapshots_hourly WHERE bucket_start BETWEEN ? AND ?";
+        return aggregate(connection, sql, fromMillis, toMillis);
+    }
+
+    private Aggregate aggregate(Connection connection, String sql, long fromMillis, long toMillis)
+            throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setLong(1, fromMillis);
+            ps.setLong(2, toMillis);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return Aggregate.EMPTY;
+                }
+                return new Aggregate(
+                        rs.getLong(1),
+                        rs.getDouble(2),
+                        rs.getInt(3),
+                        rs.getDouble(4),
+                        rs.getDouble(5),
+                        rs.getDouble(6),
+                        rs.getDouble(7),
+                        rs.getDouble(8),
+                        rs.getLong(9),
+                        rs.getLong(10)
+                );
+            }
+        }
+    }
+
+    /**
+     * The peak player count and earliest timestamp achieving it among full-resolution
+     * snapshots in {@code [fromMillis, toMillis]}, or null if the window holds none.
+     */
+    public PeakRow peakPlayerRaw(Connection connection, long fromMillis, long toMillis) throws SQLException {
+        String sql = "SELECT player_count, timestamp FROM snapshots "
+                + "WHERE timestamp BETWEEN ? AND ? ORDER BY player_count DESC, timestamp ASC LIMIT 1";
+        return peakRow(connection, sql, fromMillis, toMillis);
+    }
+
+    /**
+     * The peak player count and earliest bucket achieving it among hourly rollups in
+     * {@code [fromMillis, toMillis]}, or null if the window holds none.
+     */
+    public PeakRow peakHourlyInRange(Connection connection, long fromMillis, long toMillis) throws SQLException {
+        String sql = "SELECT player_count_max, bucket_start FROM snapshots_hourly "
+                + "WHERE bucket_start BETWEEN ? AND ? ORDER BY player_count_max DESC, bucket_start ASC LIMIT 1";
+        return peakRow(connection, sql, fromMillis, toMillis);
+    }
+
+    private PeakRow peakRow(Connection connection, String sql, long fromMillis, long toMillis) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setLong(1, fromMillis);
+            ps.setLong(2, toMillis);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? new PeakRow(rs.getInt(1), rs.getLong(2)) : null;
             }
         }
     }

@@ -177,6 +177,28 @@ class MetricsServiceTest {
     }
 
     @Test
+    void summaryMatchesTheIndividualMetricCalls() {
+        seedPlayersAndSessions();
+        seed(connection -> {
+            snapshots.insert(connection, new Snapshot(1_000, 5, 0.10, 0.20, 100, 1000));
+            snapshots.insert(connection, new Snapshot(1_500, 12, 0.30, 0.40, 300, 1000));
+            snapshots.insert(connection, new Snapshot(2_000, 8, 0.20, 0.30, 200, 1000));
+        });
+
+        long from = 1_000;
+        long to = 2_000;
+        MetricsService.Summary summary = metrics.summary(from, to);
+
+        assertEquals(metrics.currentPopulation(), summary.currentPopulation());
+        assertEquals(metrics.peakPlayers(from, to), summary.peak());
+        assertEquals(metrics.populationChange(from, to), summary.population());
+        assertEquals(metrics.newPlayerCount(from, to), summary.newPlayers());
+        assertEquals(metrics.retention(from, to), summary.retention());
+        assertEquals(metrics.sessionStats(from, to), summary.sessions());
+        assertEquals(metrics.resourceTrends(from, to), summary.resources());
+    }
+
+    @Test
     void populationChangeComparesAgainstPreviousWindow() {
         seed(connection -> {
             // previous window [0, 999]
