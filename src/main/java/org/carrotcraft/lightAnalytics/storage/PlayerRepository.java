@@ -85,6 +85,46 @@ public final class PlayerRepository {
         }
     }
 
+    /**
+     * Count of the new-player cohort first seen in {@code [fromMillis, toMillis]} that began at
+     * least one further session at or after {@code first_seen + offsetMillis} — i.e. the members
+     * still active {@code offsetMillis} (e.g. 1, 7, or 30 days) after their first login. Unlike
+     * {@link #retainedCount}, the return threshold is measured per player from their own first
+     * sight, which is what a D1/D7/D30 retention curve needs. Runs as a SQL {@code EXISTS}.
+     */
+    public long retainedAfterOffsetCount(Connection connection, long fromMillis, long toMillis, long offsetMillis)
+            throws SQLException {
+        String sql = "SELECT COUNT(*) FROM players p WHERE p.first_seen BETWEEN ? AND ? "
+                + "AND EXISTS (SELECT 1 FROM sessions s WHERE s.uuid = p.uuid "
+                + "AND s.login_time >= p.first_seen + ?)";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setLong(1, fromMillis);
+            ps.setLong(2, toMillis);
+            ps.setLong(3, offsetMillis);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getLong(1) : 0L;
+            }
+        }
+    }
+
+    /**
+     * Count of the new-player cohort first seen in {@code [fromMillis, toMillis]} that has logged in
+     * only once ever ({@code total_sessions <= 1}) — the "one and done" players behind the bounce
+     * rate. Because {@code total_sessions} is the cumulative all-time counter, this stays correct
+     * even after old session rows are pruned.
+     */
+    public long singleSessionCohortCount(Connection connection, long fromMillis, long toMillis)
+            throws SQLException {
+        String sql = "SELECT COUNT(*) FROM players WHERE first_seen BETWEEN ? AND ? AND total_sessions <= 1";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setLong(1, fromMillis);
+            ps.setLong(2, toMillis);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getLong(1) : 0L;
+            }
+        }
+    }
+
     /** Total number of distinct players ever seen. */
     public long count(Connection connection) throws SQLException {
         String sql = "SELECT COUNT(*) FROM players";

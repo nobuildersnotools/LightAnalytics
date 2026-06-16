@@ -280,6 +280,161 @@ class MetricsServiceTest {
         assertEquals(2, capped.size());                    // downsampled to the cap
     }
 
+    private static final long DAY = 86_400_000L;
+
+    @Test
+    void serversReportsCurrentPresenceAndWindowActivity() {
+        seed(connection -> {
+            long s1 = sessions.open(connection, P1, "p1", "lobby", 1_000);
+            sessions.close(connection, s1, 1_000 + 60_000);          // lobby, 60s
+            long s2 = sessions.open(connection, P2, "p2", "lobby", 1_100);
+            sessions.close(connection, s2, 1_100 + 30_000);          // lobby, 30s
+            sessions.open(connection, P1, "p1", "survival", 2_000);  // open -> survival now
+            sessions.open(connection, P2, "p2", "lobby", 2_100);     // open -> lobby now
+        });
+
+        ServersReport report = metrics.servers(1_000, 1_000_000);
+
+        // Window activity, ordered by playtime: lobby (90s over 3 sessions, 2 players) then survival.
+        assertEquals(2, report.window().size());
+        ServersReport.ServerActivity lobby = report.window().get(0);
+        assertEquals("lobby", lobby.server());
+        assertEquals(3, lobby.sessions());
+        assertEquals(2, lobby.uniquePlayers());
+        assertEquals(90_000, lobby.playtimeMillis());
+        ServersReport.ServerActivity survival = report.window().get(1);
+        assertEquals("survival", survival.server());
+        assertEquals(1, survival.sessions());
+        assertEquals(0, survival.playtimeMillis());                  // still open
+
+        // Current presence is the two still-open sessions, one per server.
+        assertEquals(2, report.current().size());
+        long online = report.current().stream().mapToLong(ServersReport.ServerPresence::online).sum();
+        assertEquals(2, online);
+    }
+
+    @Test
+    void sessionDistributionBucketsCountedSessionsByDuration() {
+        seed(connection -> {
+            closeAfter(connection, P1, "lobby", 1_000, 30_000);       // 30s   -> <1m
+            closeAfter(connection, P2, "lobby", 1_100, 180_000);      // 3m    -> 1–5m
+            closeAfter(connection, P3, "lobby", 1_200, 600_000);      // 10m   -> 5–15m
+            closeAfter(connection, P4, "lobby", 1_300, 5_400_000);    // 90m   -> 1–2h
+            closeAfter(connection, P5, "lobby", 1_400, 500);          // ghost -> excluded
+            sessions.open(connection, P1, "p1", "lobby", 1_500);      // open  -> excluded
+        });
+
+        List<DurationBucket> dist = metrics.sessionDistribution(0, 1_000_000);
+        assertEquals(8, dist.size());
+        assertEquals(1, dist.get(0).count());   // <1m
+        assertEquals(1, dist.get(1).count());   // 1–5m
+        assertEquals(1, dist.get(2).count());   // 5–15m
+        assertEquals(0, dist.get(3).count());   // 15–30m
+        assertEquals(0, dist.get(4).count());   // 30–60m
+        assertEquals(1, dist.get(5).count());   // 1–2h
+        assertEquals(0, dist.get(6).count());   // 2–4h
+        assertEquals(0, dist.get(7).count());   // 4h+
+    }
+
+    @Test
+    void activityHeatmapBucketsLoginsByUtcDayAndHour() {
+        seed(connection -> {
+            // Epoch 0 is Thursday (strftime %w = 4), hour 0 UTC.
+            sessions.open(connection, P1, "p1", "lobby", 0);
+            sessions.open(connection, P2, "p2", "lobby", 0);          // same cell -> count 2
+            sessions.open(connection, P3, "p3", "lobby", 3_600_000);  // Thu hour 1
+            sessions.open(connection, P4, "p4", "lobby", DAY);        // Friday (5) hour 0
+        });
+
+        ActivityHeatmap heatmap = metrics.activityHeatmap(0, 10 * DAY);
+        assertEquals(2, heatmap.grid()[4][0]);
+        assertEquals(1, heatmap.grid()[4][1]);
+        assertEquals(1, heatmap.grid()[5][0]);
+        assertEquals(2, heatmap.max());
+    }
+
+    @Test
+    void leaderboardRanksPlayersByPlaytimeAndHonoursLimit() {
+        seed(connection -> {
+            players.upsertOnLogin(connection, P1, "p1", 1_000);
+            players.upsertOnLogin(connection, P2, "p2", 1_000);
+            players.upsertOnLogin(connection, P3, "p3", 1_000);
+            closeAfter(connection, P1, "lobby", 1_000, 60_000);       // p1: 2 sessions, 120s
+            closeAfter(connection, P1, "lobby", 2_000, 60_000);
+            closeAfter(connection, P2, "lobby", 1_500, 300_000);      // p2: 1 session, 300s
+            closeAfter(connection, P3, "lobby", 1_800, 500);          // p3: ghost only, 0s
+        });
+
+        List<LeaderboardEntry> board = metrics.leaderboard(0, 1_000_000, 10);
+        assertEquals(3, board.size());
+        assertEquals("p2", board.get(0).username());
+        assertEquals(300_000, board.get(0).playtimeMillis());
+        assertEquals(1, board.get(0).sessions());
+        assertEquals("p1", board.get(1).username());
+        assertEquals(120_000, board.get(1).playtimeMillis());
+        assertEquals(2, board.get(1).sessions());
+        assertEquals("p3", board.get(2).username());
+        assertEquals(0, board.get(2).playtimeMillis());
+
+        assertEquals(2, metrics.leaderboard(0, 1_000_000, 2).size());
+    }
+
+    @Test
+    void stickinessCountsTrailingDayWeekAndMonthActives() {
+        long now = 100 * DAY;
+        seed(connection -> {
+            sessions.open(connection, P1, "p1", "lobby", now - 3_600_000);   // 1h ago  -> DAU
+            sessions.open(connection, P2, "p2", "lobby", now - 3 * DAY);     // 3d ago  -> WAU
+            sessions.open(connection, P3, "p3", "lobby", now - 15 * DAY);    // 15d ago -> MAU
+            sessions.open(connection, P4, "p4", "lobby", now - 40 * DAY);    // 40d ago -> none
+        });
+
+        Stickiness stick = metrics.stickiness(now);
+        assertEquals(1, stick.dau());
+        assertEquals(2, stick.wau());
+        assertEquals(3, stick.mau());
+        assertEquals(1.0 / 3.0, stick.stickiness(), 1e-9);
+    }
+
+    @Test
+    void retentionCurveComputesDayOffsetsAndBounce() {
+        seed(connection -> {
+            // PA: returns after 1 day (counts for d1 only).
+            players.upsertOnLogin(connection, P1, "p1", 1_000);
+            players.upsertOnLogin(connection, P1, "p1", 1_000 + DAY);
+            sessions.open(connection, P1, "p1", "lobby", 1_000);
+            sessions.open(connection, P1, "p1", "lobby", 1_000 + DAY);
+
+            // PB: returns after 7 days (d1, d7).
+            players.upsertOnLogin(connection, P2, "p2", 1_500);
+            players.upsertOnLogin(connection, P2, "p2", 1_500 + 7 * DAY);
+            sessions.open(connection, P2, "p2", "lobby", 1_500 + 7 * DAY);
+
+            // PC: returns after 30 days (d1, d7, d30).
+            players.upsertOnLogin(connection, P3, "p3", 1_800);
+            players.upsertOnLogin(connection, P3, "p3", 1_800 + 30 * DAY);
+            sessions.open(connection, P3, "p3", "lobby", 1_800 + 30 * DAY);
+
+            // PD: one login, never returns -> bounced.
+            players.upsertOnLogin(connection, P4, "p4", 1_200);
+            sessions.open(connection, P4, "p4", "lobby", 1_200);
+        });
+
+        RetentionCurve curve = metrics.retentionCurve(1_000, 2_000);
+        assertEquals(4, curve.cohortSize());            // PA, PB, PC, PD
+        assertEquals(3.0 / 4.0, curve.d1(), 1e-9);      // PA, PB, PC
+        assertEquals(2.0 / 4.0, curve.d7(), 1e-9);      // PB, PC
+        assertEquals(1.0 / 4.0, curve.d30(), 1e-9);     // PC
+        assertEquals(1.0 / 4.0, curve.bounceRate(), 1e-9); // PD only
+    }
+
+    /** Opens a session and closes it {@code durationMillis} later. */
+    private void closeAfter(java.sql.Connection connection, UUID uuid, String server,
+                            long loginTime, long durationMillis) throws java.sql.SQLException {
+        long id = sessions.open(connection, uuid, uuid.toString(), server, loginTime);
+        sessions.close(connection, id, loginTime + durationMillis);
+    }
+
     @Test
     void peakAndTrendsRecombineRawAndHourly() {
         seed(connection -> {

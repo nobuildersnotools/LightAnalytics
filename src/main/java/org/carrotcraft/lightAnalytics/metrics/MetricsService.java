@@ -36,6 +36,21 @@ public final class MetricsService {
     /** Closed sessions shorter than this are treated as ghost connections and excluded from playtime. */
     public static final long MIN_SESSION_MILLIS = 1_000L;
 
+    private static final long MINUTE_MILLIS = 60_000L;
+    private static final long HOUR_MILLIS = 3_600_000L;
+    private static final long DAY_MILLIS = 86_400_000L;
+
+    /** Exclusive upper bounds of the session-length histogram buckets; the last bucket is open-ended. */
+    private static final long[] DURATION_BOUNDS = {
+            MINUTE_MILLIS, 5 * MINUTE_MILLIS, 15 * MINUTE_MILLIS, 30 * MINUTE_MILLIS,
+            HOUR_MILLIS, 2 * HOUR_MILLIS, 4 * HOUR_MILLIS
+    };
+
+    /** Human labels for the histogram buckets, parallel to {@link #DURATION_BOUNDS} plus the open tail. */
+    private static final String[] DURATION_LABELS = {
+            "<1m", "1–5m", "5–15m", "15–30m", "30–60m", "1–2h", "2–4h", "4h+"
+    };
+
     private final Database database;
     private final SnapshotRepository snapshots;
     private final SessionRepository sessions;
@@ -282,6 +297,123 @@ public final class MetricsService {
             long returning = Math.max(0, unique - newPlayers);
             double avgJoins = unique == 0 ? 0.0 : (double) joins / unique;
             return new PlayerbaseStats(unique, newPlayers, returning, regular, threshold, joins, avgJoins);
+        });
+    }
+
+    /**
+     * Per-backend-server view over {@code [from, to]}: who is connected to each backend
+     * right now (from still-open sessions) plus each backend's session/player/playtime
+     * activity within the window, busiest first. The backend server is already recorded
+     * on every session; this is the first metric to read it back out.
+     */
+    public ServersReport servers(long from, long to) {
+        return database.read(connection -> {
+            List<ServersReport.ServerPresence> current = new ArrayList<>();
+            for (SessionRepository.PresenceRow r : sessions.currentByServer(connection)) {
+                current.add(new ServersReport.ServerPresence(r.server(), r.online()));
+            }
+            List<ServersReport.ServerActivity> window = new ArrayList<>();
+            for (SessionRepository.ServerRow r : sessions.serverBreakdown(connection, from, to, MIN_SESSION_MILLIS)) {
+                window.add(new ServersReport.ServerActivity(
+                        r.server(), r.sessions(), r.uniquePlayers(), r.playtimeMillis()));
+            }
+            return new ServersReport(current, window);
+        });
+    }
+
+    /**
+     * Session-length distribution over counted sessions begun in {@code [from, to]} — a
+     * histogram far more honest than the bare average, which a few marathon sessions skew.
+     * Buckets run from the ghost-connection floor ({@link #MIN_SESSION_MILLIS}) up through
+     * {@link #DURATION_BOUNDS}, the last bucket open-ended.
+     */
+    public List<DurationBucket> sessionDistribution(long from, long to) {
+        return database.read(connection -> {
+            long[] counts = sessions.durationHistogram(connection, from, to, MIN_SESSION_MILLIS, DURATION_BOUNDS);
+            List<DurationBucket> buckets = new ArrayList<>(counts.length);
+            long lower = MIN_SESSION_MILLIS;
+            for (int i = 0; i < DURATION_BOUNDS.length; i++) {
+                buckets.add(new DurationBucket(DURATION_LABELS[i], lower, DURATION_BOUNDS[i], counts[i]));
+                lower = DURATION_BOUNDS[i];
+            }
+            buckets.add(new DurationBucket(
+                    DURATION_LABELS[DURATION_LABELS.length - 1], lower, -1, counts[counts.length - 1]));
+            return buckets;
+        });
+    }
+
+    /**
+     * Login activity over {@code [from, to]} bucketed into a 7×24 day-of-week / hour-of-day
+     * (UTC) grid — the data behind the activity heatmap, showing which hours the proxy is
+     * busiest. Login counts (not concurrency) so the full grid is available across the whole
+     * session-retention window without depending on snapshot resolution.
+     */
+    public ActivityHeatmap activityHeatmap(long from, long to) {
+        return database.read(connection -> {
+            long[][] grid = new long[ActivityHeatmap.DAYS][ActivityHeatmap.HOURS];
+            long max = 0;
+            for (SessionRepository.HourCell c : sessions.activityByHour(connection, from, to)) {
+                if (c.dayOfWeek() < 0 || c.dayOfWeek() >= ActivityHeatmap.DAYS
+                        || c.hour() < 0 || c.hour() >= ActivityHeatmap.HOURS) {
+                    continue;
+                }
+                grid[c.dayOfWeek()][c.hour()] = c.count();
+                if (c.count() > max) {
+                    max = c.count();
+                }
+            }
+            return new ActivityHeatmap(grid, max);
+        });
+    }
+
+    /**
+     * Top {@code limit} players by counted playtime over sessions begun in {@code [from, to]}.
+     * Usernames are the players' current canonical names.
+     */
+    public List<LeaderboardEntry> leaderboard(long from, long to, int limit) {
+        int capped = Math.max(1, limit);
+        return database.read(connection -> {
+            List<LeaderboardEntry> out = new ArrayList<>();
+            for (SessionRepository.LeaderRow r : sessions.leaderboard(connection, from, to, MIN_SESSION_MILLIS, capped)) {
+                out.add(new LeaderboardEntry(r.username(), r.sessions(), r.playtimeMillis()));
+            }
+            return out;
+        });
+    }
+
+    /**
+     * Engagement stickiness anchored at {@code now}: distinct players active over the trailing
+     * day, week, and month, plus the DAU/MAU ratio. Independent of the dashboard window.
+     */
+    public Stickiness stickiness(long now) {
+        return database.read(connection -> {
+            long dau = sessions.uniquePlayersBetween(connection, now - DAY_MILLIS, now);
+            long wau = sessions.uniquePlayersBetween(connection, now - 7 * DAY_MILLIS, now);
+            long mau = sessions.uniquePlayersBetween(connection, now - 30 * DAY_MILLIS, now);
+            double ratio = mau == 0 ? 0.0 : (double) dau / mau;
+            return new Stickiness(dau, wau, mau, ratio);
+        });
+    }
+
+    /**
+     * D1/D7/D30 retention curve plus bounce rate for the new-player cohort first seen in
+     * {@code [from, to]}. Each D-N figure is the fraction of the cohort that logged in again
+     * at least N days after their own first login; bounce is the fraction that logged in only
+     * once, ever. All rates are 0 for an empty cohort.
+     */
+    public RetentionCurve retentionCurve(long from, long to) {
+        return database.read(connection -> {
+            long cohort = players.firstSeenCount(connection, from, to);
+            if (cohort == 0) {
+                return new RetentionCurve(0, 0.0, 0.0, 0.0, 0.0);
+            }
+            long d1 = players.retainedAfterOffsetCount(connection, from, to, DAY_MILLIS);
+            long d7 = players.retainedAfterOffsetCount(connection, from, to, 7 * DAY_MILLIS);
+            long d30 = players.retainedAfterOffsetCount(connection, from, to, 30 * DAY_MILLIS);
+            long bounced = players.singleSessionCohortCount(connection, from, to);
+            return new RetentionCurve((int) cohort,
+                    (double) d1 / cohort, (double) d7 / cohort, (double) d30 / cohort,
+                    (double) bounced / cohort);
         });
     }
 

@@ -2,15 +2,21 @@ package org.carrotcraft.lightAnalytics.web;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
+import org.carrotcraft.lightAnalytics.metrics.ActivityHeatmap;
 import org.carrotcraft.lightAnalytics.metrics.AllTimeStats;
+import org.carrotcraft.lightAnalytics.metrics.DurationBucket;
+import org.carrotcraft.lightAnalytics.metrics.LeaderboardEntry;
 import org.carrotcraft.lightAnalytics.metrics.MetricsService;
 import org.carrotcraft.lightAnalytics.metrics.PeakPlayers;
 import org.carrotcraft.lightAnalytics.metrics.PlayerbaseStats;
 import org.carrotcraft.lightAnalytics.metrics.PopulationChange;
 import org.carrotcraft.lightAnalytics.metrics.ResourceTrends;
 import org.carrotcraft.lightAnalytics.metrics.Retention;
+import org.carrotcraft.lightAnalytics.metrics.RetentionCurve;
 import org.carrotcraft.lightAnalytics.metrics.SeriesPoint;
+import org.carrotcraft.lightAnalytics.metrics.ServersReport;
 import org.carrotcraft.lightAnalytics.metrics.SessionStats;
+import org.carrotcraft.lightAnalytics.metrics.Stickiness;
 
 import java.io.IOException;
 import java.time.Clock;
@@ -27,6 +33,9 @@ import java.util.Map;
  *   <li>{@code GET /api/summary?window=24h|7d|30d} — windowed summary figures</li>
  *   <li>{@code GET /api/alltime} — all-time headline figures</li>
  *   <li>{@code GET /api/series?from&to&maxPoints} — chart time-series</li>
+ *   <li>{@code GET /api/servers?window=} — per-backend presence and activity</li>
+ *   <li>{@code GET /api/activity?window=} — login heatmap and session-length distribution</li>
+ *   <li>{@code GET /api/players?window=} — stickiness, retention curve, playtime leaderboard</li>
  *   <li>{@code POST /api/logout} — end the session</li>
  * </ul>
  */
@@ -35,6 +44,9 @@ public final class ApiHandler implements HttpHandler {
     private static final long SUMMARY_TTL_MILLIS = 10_000L;
     private static final long ALLTIME_TTL_MILLIS = 60_000L;
     private static final long SERIES_TTL_MILLIS = 10_000L;
+    /** The Servers/Players/Activity pages change slowly and run several queries; cache them longer. */
+    private static final long INSIGHTS_TTL_MILLIS = 30_000L;
+    private static final int LEADERBOARD_LIMIT = 10;
     /** Quantum for series cache keys, so near-identical zoom/pan ranges share a cached payload. */
     private static final long SERIES_KEY_QUANTUM_MILLIS = 30_000L;
     private static final int DEFAULT_MAX_POINTS = 1000;
@@ -81,6 +93,9 @@ public final class ApiHandler implements HttpHandler {
                 case "/summary" -> requireGet(exchange, this::summary);
                 case "/alltime" -> requireGet(exchange, this::allTime);
                 case "/series" -> requireGet(exchange, this::series);
+                case "/servers" -> requireGet(exchange, this::servers);
+                case "/activity" -> requireGet(exchange, this::activity);
+                case "/players" -> requireGet(exchange, this::players);
                 case "/logout" -> logout(exchange);
                 default -> WebUtil.sendJson(exchange, 404, error("not found"));
             }
@@ -104,8 +119,7 @@ public final class ApiHandler implements HttpHandler {
     }
 
     private void summary(HttpExchange exchange) throws IOException {
-        String requested = WebUtil.queryParams(exchange).get("window");
-        String label = WINDOWS.containsKey(requested) ? requested : "24h";
+        String label = windowLabel(exchange);
         Duration window = WINDOWS.get(label);
         String json = cache.get("summary:" + label, SUMMARY_TTL_MILLIS, () -> {
             long to = clock.millis();
@@ -220,6 +234,123 @@ public final class ApiHandler implements HttpHandler {
                     .build();
         });
         WebUtil.sendJson(exchange, 200, json);
+    }
+
+    private void servers(HttpExchange exchange) throws IOException {
+        String label = windowLabel(exchange);
+        Duration window = WINDOWS.get(label);
+        String json = cache.get("servers:" + label, INSIGHTS_TTL_MILLIS, () -> {
+            long to = clock.millis();
+            long from = to - window.toMillis();
+            ServersReport report = metrics.servers(from, to);
+            Json.JsonArray current = Json.array();
+            for (ServersReport.ServerPresence p : report.current()) {
+                current.addRaw(Json.object()
+                        .add("server", p.server())
+                        .add("online", p.online())
+                        .build());
+            }
+            Json.JsonArray windowed = Json.array();
+            for (ServersReport.ServerActivity a : report.window()) {
+                windowed.addRaw(Json.object()
+                        .add("server", a.server())
+                        .add("sessions", a.sessions())
+                        .add("uniquePlayers", a.uniquePlayers())
+                        .add("playtimeMillis", a.playtimeMillis())
+                        .build());
+            }
+            return Json.object()
+                    .add("window", label)
+                    .add("from", from)
+                    .add("to", to)
+                    .addRaw("current", current.build())
+                    .addRaw("activity", windowed.build())
+                    .build();
+        });
+        WebUtil.sendJson(exchange, 200, json);
+    }
+
+    private void activity(HttpExchange exchange) throws IOException {
+        String label = windowLabel(exchange);
+        Duration window = WINDOWS.get(label);
+        String json = cache.get("activity:" + label, INSIGHTS_TTL_MILLIS, () -> {
+            long to = clock.millis();
+            long from = to - window.toMillis();
+            ActivityHeatmap heatmap = metrics.activityHeatmap(from, to);
+            Json.JsonArray rows = Json.array();
+            for (long[] day : heatmap.grid()) {
+                Json.JsonArray hours = Json.array();
+                for (long count : day) {
+                    hours.addRaw(Long.toString(count));
+                }
+                rows.addRaw(hours.build());
+            }
+            Json.JsonArray dist = Json.array();
+            for (DurationBucket b : metrics.sessionDistribution(from, to)) {
+                dist.addRaw(Json.object()
+                        .add("label", b.label())
+                        .add("lowerMillis", b.lowerMillis())
+                        .add("upperMillis", b.upperMillis())
+                        .add("count", b.count())
+                        .build());
+            }
+            return Json.object()
+                    .add("window", label)
+                    .add("from", from)
+                    .add("to", to)
+                    .addRaw("heatmap", Json.object()
+                            .add("max", heatmap.max())
+                            .addRaw("grid", rows.build())
+                            .build())
+                    .addRaw("distribution", dist.build())
+                    .build();
+        });
+        WebUtil.sendJson(exchange, 200, json);
+    }
+
+    private void players(HttpExchange exchange) throws IOException {
+        String label = windowLabel(exchange);
+        Duration window = WINDOWS.get(label);
+        String json = cache.get("players:" + label, INSIGHTS_TTL_MILLIS, () -> {
+            long to = clock.millis();
+            long from = to - window.toMillis();
+            Stickiness stick = metrics.stickiness(to);
+            RetentionCurve curve = metrics.retentionCurve(from, to);
+            Json.JsonArray board = Json.array();
+            for (LeaderboardEntry e : metrics.leaderboard(from, to, LEADERBOARD_LIMIT)) {
+                board.addRaw(Json.object()
+                        .add("username", e.username())
+                        .add("sessions", e.sessions())
+                        .add("playtimeMillis", e.playtimeMillis())
+                        .build());
+            }
+            return Json.object()
+                    .add("window", label)
+                    .add("from", from)
+                    .add("to", to)
+                    .addRaw("stickiness", Json.object()
+                            .add("dau", stick.dau())
+                            .add("wau", stick.wau())
+                            .add("mau", stick.mau())
+                            .add("stickiness", stick.stickiness())
+                            .build())
+                    .addRaw("retention", Json.object()
+                            .add("cohortSize", curve.cohortSize())
+                            .add("d1", curve.d1())
+                            .add("d7", curve.d7())
+                            .add("d30", curve.d30())
+                            .add("bounceRate", curve.bounceRate())
+                            .build())
+                    .addRaw("leaderboard", board.build())
+                    .build();
+        });
+        WebUtil.sendJson(exchange, 200, json);
+    }
+
+    /** The validated {@code window} query param ({@code 24h}/{@code 7d}/{@code 30d}), defaulting to {@code 24h}. */
+    private static String windowLabel(HttpExchange exchange) {
+        String requested = WebUtil.queryParams(exchange).get("window");
+        return WINDOWS.containsKey(requested) ? requested : "24h";
     }
 
     private void logout(HttpExchange exchange) throws IOException {

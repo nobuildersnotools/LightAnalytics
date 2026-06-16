@@ -8,6 +8,17 @@
 const $ = (id) => document.getElementById(id);
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
+// Build an element with optional class and text. Text is set via textContent, so
+// names from the API (servers, usernames) can never inject markup.
+function el(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text != null) node.textContent = text;
+    return node;
+}
+
+const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
 const COLORS = {
     green: "#5be08a", amber: "#f2c14e", orange: "#e8884b",
     blue: "#6fb3ff", red: "#ff6b6b", muted: "#69745f",
@@ -505,6 +516,188 @@ async function loadAllTime() {
     } catch (e) { if (e.message !== "unauthorized") toast("Failed to load all-time stats"); }
 }
 
+// ---- servers tab -----------------------------------------------------------
+function barRow(name, meta, valueMain, valueSub, frac) {
+    const row = el("div", "row");
+    const bar = el("div", "row-bar");
+    bar.style.width = clamp(frac, 0, 1) * 100 + "%";
+    row.appendChild(bar);
+
+    const nm = el("div", "row-name");
+    nm.appendChild(el("span", null, name));
+    if (meta) nm.appendChild(el("span", "row-meta", meta));
+    row.appendChild(nm);
+
+    const val = el("div", "row-val", valueMain);
+    if (valueSub != null) val.appendChild(el("span", "row-val-sub", valueSub));
+    row.appendChild(val);
+    return row;
+}
+
+function renderRows(host, items, emptyMsg, build) {
+    host.innerHTML = "";
+    if (!items.length) { host.appendChild(el("div", "rows-empty", emptyMsg)); return; }
+    for (const item of items) host.appendChild(build(item));
+}
+
+function renderServers(data) {
+    const maxOnline = Math.max(1, ...data.current.map((s) => s.online));
+    renderRows($("serverPresence"), data.current, "no players connected", (s) =>
+        barRow(s.server, null, fmtInt(s.online) + (s.online === 1 ? " player" : " players"),
+            null, s.online / maxOnline));
+
+    const maxPlay = Math.max(1, ...data.activity.map((s) => s.playtimeMillis));
+    renderRows($("serverActivity"), data.activity, "no sessions in this window", (s) =>
+        barRow(s.server, fmtInt(s.uniquePlayers) + (s.uniquePlayers === 1 ? " player" : " players"),
+            fmtDuration(s.playtimeMillis),
+            fmtInt(s.sessions) + (s.sessions === 1 ? " session" : " sessions"),
+            s.playtimeMillis / maxPlay));
+}
+
+async function loadServers() {
+    try { renderServers(await getJSON(`/api/servers?window=${currentWindow}`)); }
+    catch (e) { if (e.message !== "unauthorized") toast("Failed to load servers"); }
+}
+
+// ---- players tab -----------------------------------------------------------
+function curveCell(label, frac, color, sub) {
+    const cell = el("div", "curve-cell");
+    cell.appendChild(el("div", "curve-label", label));
+    cell.appendChild(el("div", "curve-val", fmtPct(frac, 0)));
+    const bar = el("div", "curve-bar");
+    const span = el("span");
+    span.style.width = clamp(frac, 0, 1) * 100 + "%";
+    span.style.background = color;
+    bar.appendChild(span);
+    cell.appendChild(bar);
+    cell.appendChild(el("div", "curve-sub", sub));
+    return cell;
+}
+
+function renderPlayers(data) {
+    const st = data.stickiness;
+    $("stDau").textContent = fmtInt(st.dau);
+    $("stWau").textContent = fmtInt(st.wau);
+    $("stMau").textContent = fmtInt(st.mau);
+    $("stRatio").textContent = st.mau === 0 ? "—" : fmtPct(st.stickiness, 0);
+
+    const curve = $("retentionCurve");
+    curve.innerHTML = "";
+    const r = data.retention;
+    if (r.cohortSize === 0) {
+        curve.appendChild(el("div", "rows-empty", "no new players in this window"));
+    } else {
+        curve.appendChild(curveCell("returned · d1", r.d1, COLORS.green, "of cohort"));
+        curve.appendChild(curveCell("returned · d7", r.d7, COLORS.green, "of cohort"));
+        curve.appendChild(curveCell("returned · d30", r.d30, COLORS.green, "of cohort"));
+        curve.appendChild(curveCell("bounced", r.bounceRate, COLORS.red,
+            r.cohortSize + (r.cohortSize === 1 ? " new player" : " new players")));
+    }
+
+    const body = $("leaderboardBody");
+    body.innerHTML = "";
+    if (!data.leaderboard.length) {
+        const tr = el("tr");
+        const td = el("td", "rows-empty", "no sessions in this window");
+        td.colSpan = 4;
+        tr.appendChild(td);
+        body.appendChild(tr);
+        return;
+    }
+    data.leaderboard.forEach((p, i) => {
+        const tr = el("tr");
+        tr.appendChild(el("td", "board-rank", String(i + 1)));
+        tr.appendChild(el("td", "board-name", p.username));
+        tr.appendChild(el("td", "board-num", fmtInt(p.sessions)));
+        tr.appendChild(el("td", "board-num", fmtDuration(p.playtimeMillis)));
+        body.appendChild(tr);
+    });
+}
+
+async function loadPlayers() {
+    try { renderPlayers(await getJSON(`/api/players?window=${currentWindow}`)); }
+    catch (e) { if (e.message !== "unauthorized") toast("Failed to load player stats"); }
+}
+
+// ---- activity tab ----------------------------------------------------------
+function renderHeatmap(data) {
+    const hm = $("heatmap");
+    hm.innerHTML = "";
+    const grid = data.grid, max = data.max || 1;
+    hm.appendChild(el("div", "hm-corner"));
+    for (let h = 0; h < 24; h++) hm.appendChild(el("div", "hm-hour", h % 3 === 0 ? String(h) : ""));
+    for (let d = 0; d < 7; d++) {
+        hm.appendChild(el("div", "hm-day", DOW[d]));
+        for (let h = 0; h < 24; h++) {
+            const c = (grid[d] && grid[d][h]) || 0;
+            const cell = el("div", "hm-cell");
+            if (c > 0) {
+                const a = 0.12 + 0.88 * (c / max);
+                cell.style.background = `rgba(91,224,138,${a.toFixed(3)})`;
+            }
+            cell.title = `${DOW[d]} ${String(h).padStart(2, "0")}:00 UTC · ${fmtInt(c)} login${c === 1 ? "" : "s"}`;
+            hm.appendChild(cell);
+        }
+    }
+}
+
+function renderHistogram(dist) {
+    const hist = $("histogram");
+    hist.innerHTML = "";
+    const total = dist.reduce((s, b) => s + b.count, 0);
+    if (total === 0) { hist.appendChild(el("div", "rows-empty", "no sessions in this window")); return; }
+    const max = Math.max(1, ...dist.map((b) => b.count));
+    for (const b of dist) {
+        const col = el("div", "histo-col");
+        col.appendChild(el("div", "histo-count", b.count ? fmtInt(b.count) : ""));
+        const track = el("div", "histo-track");
+        const bar = el("div", "histo-bar");
+        bar.style.height = (b.count / max * 100).toFixed(1) + "%";
+        bar.title = fmtInt(b.count) + (b.count === 1 ? " session" : " sessions");
+        track.appendChild(bar);
+        col.appendChild(track);
+        col.appendChild(el("div", "histo-label", b.label));
+        hist.appendChild(col);
+    }
+}
+
+async function loadActivity() {
+    try {
+        const data = await getJSON(`/api/activity?window=${currentWindow}`);
+        renderHeatmap(data.heatmap);
+        renderHistogram(data.distribution);
+    } catch (e) { if (e.message !== "unauthorized") toast("Failed to load activity"); }
+}
+
+// ---- tab routing -----------------------------------------------------------
+let currentTab = "overview";
+const TAB_LOADERS = { servers: loadServers, players: loadPlayers, activity: loadActivity };
+// Tracks which tabs hold data for the current window, so panels load lazily on
+// first view and refresh when the window changes.
+const tabLoaded = { overview: true };
+
+function loadActiveTab() {
+    const loader = TAB_LOADERS[currentTab];
+    if (loader) loader();
+}
+
+function switchTab(tab) {
+    if (tab === currentTab || (tab !== "overview" && !TAB_LOADERS[tab])) return;
+    currentTab = tab;
+    for (const btn of $("tabs").children) btn.classList.toggle("is-active", btn.dataset.tab === tab);
+    for (const panel of document.querySelectorAll(".tab-panel")) panel.hidden = panel.id !== "tab-" + tab;
+    if (!tabLoaded[tab]) { tabLoaded[tab] = true; loadActiveTab(); }
+    // The canvas can't size itself while display:none, so redraw once visible.
+    if (tab === "overview" && chart) chart.scheduleDraw();
+}
+
+// Window changed: insight panels are window-scoped, so invalidate them and refresh
+// whichever one is currently visible.
+function invalidateInsights() {
+    for (const key of Object.keys(TAB_LOADERS)) tabLoaded[key] = false;
+    if (currentTab !== "overview") { tabLoaded[currentTab] = true; loadActiveTab(); }
+}
+
 function resetToWindow() {
     const to = Date.now();
     const from = to - WINDOWS[currentWindow];
@@ -534,6 +727,11 @@ function init() {
 
     buildLegend();
 
+    $("tabs").addEventListener("click", (e) => {
+        const btn = e.target.closest(".tab");
+        if (btn) switchTab(btn.dataset.tab);
+    });
+
     $("windowToggle").addEventListener("click", (e) => {
         const btn = e.target.closest(".seg");
         if (!btn) return;
@@ -543,6 +741,7 @@ function init() {
         $("resetZoom").hidden = true;
         resetToWindow();
         loadSummary();
+        invalidateInsights();
     });
 
     const reset = $("resetZoom");
@@ -559,7 +758,11 @@ function init() {
     resetToWindow();
 
     // Gentle live refresh of the headline figures (leaves the chart view alone).
-    setInterval(() => { loadAllTime(); loadSummary(); }, 30000);
+    setInterval(() => {
+        loadAllTime();
+        loadSummary();
+        if (currentTab !== "overview") loadActiveTab();
+    }, 30000);
 }
 
 document.addEventListener("DOMContentLoaded", init);
