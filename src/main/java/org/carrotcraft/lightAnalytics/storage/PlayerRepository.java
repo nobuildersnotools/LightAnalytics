@@ -67,18 +67,25 @@ public final class PlayerRepository {
 
     /**
      * Count of the new-player cohort first seen in {@code [fromMillis, toMillis]} that
-     * began at least one further session strictly after {@code afterMillis} — i.e. the
+     * began at least one further session strictly after their own first login — i.e. the
      * retained members. The membership test runs as a SQL {@code EXISTS} so neither the
      * cohort nor the returner set is transferred to the metrics layer.
+     *
+     * <p>The return threshold is anchored to each player's {@code first_seen}, not to the
+     * end of the window. Anchoring it to the window end made the figure structurally zero
+     * for any window ending at the present moment — no session can start in the future —
+     * which is every window the summary and dashboard actually ask for. A player's own
+     * first session is excluded by the strict {@code >}: {@code login_time} and
+     * {@code first_seen} are written from the same timestamp on {@code PostLoginEvent}.
      */
-    public long retainedCount(Connection connection, long fromMillis, long toMillis, long afterMillis)
+    public long retainedCount(Connection connection, long fromMillis, long toMillis)
             throws SQLException {
         String sql = "SELECT COUNT(*) FROM players p WHERE p.first_seen BETWEEN ? AND ? "
-                + "AND EXISTS (SELECT 1 FROM sessions s WHERE s.uuid = p.uuid AND s.login_time > ?)";
+                + "AND EXISTS (SELECT 1 FROM sessions s WHERE s.uuid = p.uuid "
+                + "AND s.login_time > p.first_seen)";
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setLong(1, fromMillis);
             ps.setLong(2, toMillis);
-            ps.setLong(3, afterMillis);
             try (ResultSet rs = ps.executeQuery()) {
                 return rs.next() ? rs.getLong(1) : 0L;
             }
@@ -88,9 +95,9 @@ public final class PlayerRepository {
     /**
      * Count of the new-player cohort first seen in {@code [fromMillis, toMillis]} that began at
      * least one further session at or after {@code first_seen + offsetMillis} — i.e. the members
-     * still active {@code offsetMillis} (e.g. 1, 7, or 30 days) after their first login. Unlike
-     * {@link #retainedCount}, the return threshold is measured per player from their own first
-     * sight, which is what a D1/D7/D30 retention curve needs. Runs as a SQL {@code EXISTS}.
+     * still active {@code offsetMillis} (e.g. 1, 7, or 30 days) after their first login. This is
+     * {@link #retainedCount} with a minimum gap imposed on the return, which is what a D1/D7/D30
+     * retention curve needs. Runs as a SQL {@code EXISTS}.
      */
     public long retainedAfterOffsetCount(Connection connection, long fromMillis, long toMillis, long offsetMillis)
             throws SQLException {

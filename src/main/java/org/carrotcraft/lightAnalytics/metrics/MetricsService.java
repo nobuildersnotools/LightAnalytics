@@ -84,7 +84,7 @@ public final class MetricsService {
             ResourceTrends resources = resourceTrends(raw, hourly);
 
             long cohort = players.firstSeenCount(connection, from, to);
-            long retained = players.retainedCount(connection, from, to, to);
+            long retained = players.retainedCount(connection, from, to);
             Retention retention = new Retention((int) cohort, (int) retained,
                     cohort == 0 ? 0.0 : (double) retained / cohort);
 
@@ -419,12 +419,14 @@ public final class MetricsService {
 
     /**
      * Retention of the new-player cohort first seen in {@code [from, to]}: the
-     * fraction that started any further session strictly after {@code to}.
+     * fraction that came back for at least one further session after their own
+     * first login. Measuring the return per player rather than relative to
+     * {@code to} is what keeps the figure meaningful for a window ending now.
      */
     public Retention retention(long from, long to) {
         return database.read(connection -> {
             long cohort = players.firstSeenCount(connection, from, to);
-            long retained = players.retainedCount(connection, from, to, to);
+            long retained = players.retainedCount(connection, from, to);
             double rate = cohort == 0 ? 0.0 : (double) retained / cohort;
             return new Retention((int) cohort, (int) retained, rate);
         });

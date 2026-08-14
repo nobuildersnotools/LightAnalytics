@@ -102,6 +102,37 @@ class MetricsServiceTest {
         assertEquals(2.0 / 3.0, r.retentionRate(), 1e-9);
     }
 
+    /**
+     * Regression: retention used to count returns strictly after the window end, so any
+     * window ending at the present moment — which is every window the summary and the
+     * dashboard ask for — reported 0% no matter how many players came back. The returns
+     * here all fall inside the window, exactly as they do in production.
+     */
+    @Test
+    void retentionCountsReturnsInsideAWindowEndingNow() {
+        long now = System.currentTimeMillis();
+        long from = now - 24 * 60 * 60 * 1000L;
+        seed(connection -> {
+            // p1 joins, leaves, comes back an hour later -> retained.
+            players.upsertOnLogin(connection, P1, "p1", from + 1_000);
+            long a = sessions.open(connection, P1, "p1", "lobby", from + 1_000);
+            sessions.close(connection, a, from + 61_000);
+            players.upsertOnLogin(connection, P1, "p1", from + 3_600_000);
+            long b = sessions.open(connection, P1, "p1", "lobby", from + 3_600_000);
+            sessions.close(connection, b, from + 3_660_000);
+
+            // p2 joins once and never returns -> not retained.
+            players.upsertOnLogin(connection, P2, "p2", from + 2_000);
+            long c = sessions.open(connection, P2, "p2", "lobby", from + 2_000);
+            sessions.close(connection, c, from + 62_000);
+        });
+
+        Retention r = metrics.retention(from, now);
+        assertEquals(2, r.cohortSize());
+        assertEquals(1, r.retainedCount());
+        assertEquals(0.5, r.retentionRate(), 1e-9);
+    }
+
     @Test
     void playerbaseCountsUniqueNewReturningRegularAndJoins() {
         seedPlayersAndSessions();
